@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "description": "Minimal local forwarding proxy that lets the Infinite Canvas web app call AI provider APIs without CORS restrictions.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yunshu-huabu/infinite-canvas.git",
+    "directory": "canvas-proxy"
+  },
   "type": "module",
   "main": "./index.js",
   "bin": {

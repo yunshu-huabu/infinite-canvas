@@ -26,6 +26,13 @@ export type AppUser = {
     last_login_at: string | null;
 };
 
+export type WorkspaceSnapshot = {
+    projects: unknown[];
+    assets: unknown[];
+    deletedProjects: unknown[];
+    updatedAt: string;
+};
+
 export class AppDatabase {
     readonly sqlite: Database;
 
@@ -97,6 +104,11 @@ export class AppDatabase {
                 status INTEGER NOT NULL,
                 duration_ms INTEGER NOT NULL,
                 created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS workspace_snapshots (
+                user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires_at);
             CREATE INDEX IF NOT EXISTS user_sessions_expires_idx ON user_sessions(expires_at);
@@ -258,6 +270,31 @@ export class AppDatabase {
 
     recordRequest(channelId: string, method: string, path: string, status: number, durationMs: number) {
         this.sqlite.query("INSERT INTO api_requests (channel_id, method, path, status, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(channelId, method, path.slice(0, 500), status, durationMs, new Date().toISOString());
+    }
+
+    workspaceSnapshot(userId: number): WorkspaceSnapshot {
+        const row = this.sqlite.query("SELECT payload, updated_at FROM workspace_snapshots WHERE user_id = ?").get(userId) as { payload: string; updated_at: string } | null;
+        if (!row) return { projects: [], assets: [], deletedProjects: [], updatedAt: "" };
+        try {
+            const parsed = JSON.parse(row.payload) as Partial<WorkspaceSnapshot>;
+            return {
+                projects: Array.isArray(parsed.projects) ? parsed.projects : [],
+                assets: Array.isArray(parsed.assets) ? parsed.assets : [],
+                deletedProjects: Array.isArray(parsed.deletedProjects) ? parsed.deletedProjects : [],
+                updatedAt: row.updated_at,
+            };
+        } catch {
+            return { projects: [], assets: [], deletedProjects: [], updatedAt: row.updated_at };
+        }
+    }
+
+    setWorkspaceSnapshot(userId: number, snapshot: Omit<WorkspaceSnapshot, "updatedAt">) {
+        const updatedAt = new Date().toISOString();
+        const payload = JSON.stringify(snapshot);
+        this.sqlite
+            .query("INSERT INTO workspace_snapshots (user_id, payload, updated_at) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at")
+            .run(userId, payload, updatedAt);
+        return { ...snapshot, updatedAt };
     }
 
     dashboard() {

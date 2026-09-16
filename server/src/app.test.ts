@@ -146,6 +146,35 @@ describe("admin authentication", () => {
     });
 });
 
+describe("workspace persistence", () => {
+    test("stores a user workspace snapshot behind user authentication", async () => {
+        const { response, cookie } = await loginUser();
+        expect(response.status).toBe(200);
+        const write = await app.fetch(
+            new Request("http://localhost/api/workspace/snapshot", {
+                method: "PUT",
+                headers: {
+                    cookie,
+                    "content-type": "application/json",
+                    origin: "http://localhost",
+                },
+                body: JSON.stringify({
+                    projects: [{ id: "p1", updatedAt: "2026-09-16T00:00:00.000Z" }],
+                    assets: [],
+                    deletedProjects: [],
+                }),
+            }),
+        );
+        expect(write.status).toBe(200);
+        const read = await app.fetch(
+            new Request("http://localhost/api/workspace/snapshot", {
+                headers: { cookie },
+            }),
+        );
+        expect((await read.json()).snapshot.projects[0].id).toBe("p1");
+    });
+});
+
 describe("managed configuration", () => {
     test("never exposes provider credentials to the public config", async () => {
         const config = app.db.getConfig();

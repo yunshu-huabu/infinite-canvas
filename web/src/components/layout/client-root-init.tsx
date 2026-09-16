@@ -5,6 +5,8 @@ import { useTranslation } from "react-i18next";
 
 import { useConfigStore } from "@/stores/use-config-store";
 import { usePromptSourceScheduler } from "@/hooks/use-prompt-source-scheduler";
+import { syncWorkspaceSnapshot } from "@/services/workspace-sync";
+import { useUserStore } from "@/stores/use-user-store";
 
 export function ClientRootInit({ children }: { children: ReactNode }) {
     const { message } = App.useApp();
@@ -12,8 +14,14 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
     const handledConfigParams = useRef(false);
     const importChannelCredentials = useConfigStore((state) => state.importChannelCredentials);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
+    const user = useUserStore((state) => state.user);
 
     usePromptSourceScheduler();
+
+    useEffect(() => {
+        if (!user) return;
+        void syncWorkspaceSnapshot().catch((error) => console.warn("Workspace sync unavailable", error));
+    }, [user?.id]);
 
     useEffect(() => {
         if (handledConfigParams.current) return;

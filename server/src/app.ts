@@ -46,6 +46,8 @@ export async function createApp(options: AppOptions = {}) {
             if (url.pathname.startsWith("/api/auth/")) return handleUserAuth(request, url, db);
             if (url.pathname.startsWith("/api/admin/")) return handleAdmin(request, url, db);
             const userAuth = authenticateUser(request, db);
+            if (url.pathname === "/api/workspace/snapshot" && userAuth) return handleWorkspaceSnapshot(request, userAuth.user.id, db);
+            if (url.pathname === "/api/workspace/snapshot") return json({ error: "需要用户登录" }, 401);
             if (url.pathname === "/api/config" && request.method === "GET")
                 return userAuth
                     ? json({ config: publicConfig(db.getConfig()) }, 200, {
@@ -319,6 +321,18 @@ async function handleUserAuth(request: Request, url: URL, db: AppDatabase) {
         });
     }
     return json({ error: "用户接口不存在" }, 404);
+}
+
+async function handleWorkspaceSnapshot(request: Request, userId: number, db: AppDatabase) {
+    if (request.method === "GET") return json({ snapshot: db.workspaceSnapshot(userId) });
+    if (request.method !== "PUT") return json({ error: "工作区接口不支持此方法" }, 405);
+    const body = await readJson<{ projects?: unknown[]; assets?: unknown[]; deletedProjects?: unknown[] }>(request);
+    const snapshot = db.setWorkspaceSnapshot(userId, {
+        projects: Array.isArray(body.projects) ? body.projects : [],
+        assets: Array.isArray(body.assets) ? body.assets : [],
+        deletedProjects: Array.isArray(body.deletedProjects) ? body.deletedProjects : [],
+    });
+    return json({ snapshot });
 }
 
 async function handleAiProxy(request: Request, url: URL, db: AppDatabase) {

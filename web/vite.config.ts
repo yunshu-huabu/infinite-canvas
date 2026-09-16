@@ -42,8 +42,13 @@ export default defineConfig({
     base: process.env.VITE_BASE || "/",
     plugins: [react(), localPluginsManifest()],
     server: {
+        host: "0.0.0.0",
         proxy: {
-            "/api": "http://127.0.0.1:3001",
+            "/api": {
+                target: "http://127.0.0.1:3001",
+                changeOrigin: false,
+                xfwd: true,
+            },
         },
     },
     resolve: {

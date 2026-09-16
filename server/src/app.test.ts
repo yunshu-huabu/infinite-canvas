@@ -93,6 +93,26 @@ describe("admin authentication", () => {
         expect(response.status).toBe(200);
     });
 
+    test("accepts a LAN request forwarded by the development proxy", async () => {
+        const response = await app.fetch(
+            new Request("http://127.0.0.1:3001/api/auth/login", {
+                method: "POST",
+                headers: {
+                    "content-type": "application/json",
+                    origin: "http://192.168.31.84:3000",
+                    host: "127.0.0.1:3001",
+                    "x-forwarded-host": "192.168.31.84:3000",
+                    "x-forwarded-proto": "http",
+                },
+                body: JSON.stringify({
+                    username: "creator",
+                    password: "creator-password",
+                }),
+            }),
+        );
+        expect(response.status).toBe(200);
+    });
+
     test("rejects a cross-site login request", async () => {
         const response = await app.fetch(
             new Request("http://localhost/api/admin/login", {

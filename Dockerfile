@@ -15,6 +15,7 @@ FROM oven/bun:1.3.13
 WORKDIR /app
 COPY --from=web-build /app/web/dist ./web/dist
 COPY server ./server
+COPY scripts ./scripts
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \

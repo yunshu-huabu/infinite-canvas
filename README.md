@@ -119,8 +119,12 @@ bun run dev
 ```bash
 git clone git@github.com:yunshu-huabu/infinite-canvas.git
 cd infinite-canvas
+cp .env.example .env
+# 修改 .env 中的管理员密码和配置加密密钥
 docker compose up -d
 ```
+
+容器通过 `/api/health` 执行健康检查，服务端数据库和加密主密钥保存在持久化数据卷中。生产升级前可运行 `bun run backup` 创建 SQLite 备份；恢复时先停止服务，再运行 `bun run restore -- backups/<文件名>.sqlite`。浏览器 IndexedDB 中的画布、素材和生成记录不包含在服务端备份中，仍需从前端单独导出。
 
 运行后默认端口3000，可访问 `http://localhost:3000`。
 

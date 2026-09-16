@@ -62,6 +62,11 @@ async function loginManagedUser(username: string, password: string) {
 }
 
 describe("admin authentication", () => {
+    test("reports service health without authentication", async () => {
+        const response = await app.fetch(new Request("http://localhost/api/health"));
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ ok: true, version: "0.1.0" });
+    });
     test("creates the initial administrator and logs in", async () => {
         expect(app.initialPassword).toBe("correct-horse-battery");
         const { response, cookie } = await login();

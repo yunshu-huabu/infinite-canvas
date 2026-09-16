@@ -1,12 +1,12 @@
-import { App, Button, Form, Input, Popconfirm, Select, Spin, Table, Tag, Tooltip } from "antd";
-import { Activity, ArrowLeft, AudioLines, BookOpenCheck, Boxes, Gauge, Image, KeyRound, LogOut, Plus, RefreshCw, Save, Settings2, ShieldCheck, Trash2, Video } from "lucide-react";
+import { App, Button, Form, Input, Modal, Popconfirm, Select, Spin, Switch, Table, Tag, Tooltip } from "antd";
+import { Activity, ArrowLeft, AudioLines, BookOpenCheck, Boxes, Gauge, Image, KeyRound, LogOut, Pencil, Plus, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, Trash2, UserPlus, Users, Video } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { adminApi, type AdminConfig, type AdminUser, type AuditLog, type DashboardData } from "@/services/admin-api";
+import { adminApi, type AdminConfig, type AdminUser, type AuditLog, type DashboardData, type ManagedUser } from "@/services/admin-api";
 import { createModelChannel, encodeChannelModel, type ModelCapability } from "@/stores/use-config-store";
 
-type Section = "overview" | "channels" | "defaults" | "audit" | "security";
+type Section = "overview" | "users" | "channels" | "defaults" | "audit" | "security";
 
 const capabilityOptions = [
     { value: "image", label: "图片" },
@@ -23,13 +23,15 @@ export default function AdminPage() {
     const [dashboard, setDashboard] = useState<DashboardData | null>(null);
     const [config, setConfig] = useState<AdminConfig | null>(null);
     const [audits, setAudits] = useState<AuditLog[]>([]);
+    const [managedUsers, setManagedUsers] = useState<ManagedUser[]>([]);
     const [saving, setSaving] = useState(false);
 
     const loadData = useCallback(async () => {
-        const [dashboardData, configData, auditData] = await Promise.all([adminApi.dashboard(), adminApi.config(), adminApi.auditLogs()]);
+        const [dashboardData, configData, auditData, userData] = await Promise.all([adminApi.dashboard(), adminApi.config(), adminApi.auditLogs(), adminApi.users()]);
         setDashboard(dashboardData);
         setConfig(configData.config);
         setAudits(auditData.logs);
+        setManagedUsers(userData.users);
     }, []);
 
     useEffect(() => {
@@ -98,6 +100,7 @@ export default function AdminPage() {
                 </div>
                 <nav className="flex-1 space-y-1 p-3">
                     <AdminNav active={section} value="overview" icon={Gauge} label="运行概览" onClick={setSection} />
+                    <AdminNav active={section} value="users" icon={Users} label="用户管理" onClick={setSection} />
                     <AdminNav active={section} value="channels" icon={Boxes} label="AI 渠道" onClick={setSection} />
                     <AdminNav active={section} value="defaults" icon={Settings2} label="默认配置" onClick={setSection} />
                     <AdminNav active={section} value="audit" icon={BookOpenCheck} label="审计日志" onClick={setSection} />
@@ -135,6 +138,7 @@ export default function AdminPage() {
                 </header>
                 <div className="mx-auto max-w-7xl p-4 sm:p-7">
                     {section === "overview" && dashboard ? <Overview data={dashboard} onRefresh={() => void loadData()} /> : null}
+                    {section === "users" ? <UsersManager users={managedUsers} onRefresh={loadData} /> : null}
                     {section === "channels" && config ? <ChannelsEditor config={config} onChange={setConfig} /> : null}
                     {section === "defaults" && config ? <DefaultsEditor config={config} onChange={setConfig} /> : null}
                     {section === "audit" ? <AuditLogs logs={audits} /> : null}
@@ -184,6 +188,7 @@ function Overview({ data, onRefresh }: { data: DashboardData; onRefresh: () => v
         { label: "失败请求", value: data.failed24h, hint: data.requests24h ? `${Math.round((data.failed24h / data.requests24h) * 100)}% 失败率` : "暂无请求", icon: ShieldCheck },
         { label: "平均响应", value: `${data.averageMs24h} ms`, hint: "24 小时平均耗时", icon: Gauge },
         { label: "模型资源", value: `${data.channelCount} / ${data.modelCount}`, hint: "渠道 / 模型", icon: Boxes },
+        { label: "创作用户", value: data.userCount, hint: "已创建用户账号", icon: Users },
     ];
     return (
         <div className="space-y-7">
@@ -196,7 +201,7 @@ function Overview({ data, onRefresh }: { data: DashboardData; onRefresh: () => v
                     <Button shape="circle" icon={<RefreshCw className="size-4" />} onClick={onRefresh} />
                 </Tooltip>
             </div>
-            <section className="grid border-y border-stone-200 md:grid-cols-4 dark:border-stone-800">
+            <section className="grid border-y border-stone-200 sm:grid-cols-2 xl:grid-cols-5 dark:border-stone-800">
                 {metrics.map(({ label, value, hint, icon: Icon }, index) => (
                     <div key={label} className={`px-5 py-5 ${index ? "border-l border-stone-200 dark:border-stone-800" : ""}`}>
                         <div className="flex items-center gap-2 text-xs text-stone-500">
@@ -363,6 +368,162 @@ function DefaultsEditor({ config, onChange }: { config: AdminConfig; onChange: (
     );
 }
 
+function UsersManager({ users, onRefresh }: { users: ManagedUser[]; onRefresh: () => Promise<void> }) {
+    const { message } = App.useApp();
+    const [createOpen, setCreateOpen] = useState(false);
+    const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
+    const [resetUser, setResetUser] = useState<ManagedUser | null>(null);
+    const [submitting, setSubmitting] = useState(false);
+    const [createForm] = Form.useForm();
+    const [editForm] = Form.useForm();
+    const [resetForm] = Form.useForm();
+
+    const run = async (action: () => Promise<unknown>, success: string) => {
+        setSubmitting(true);
+        try {
+            await action();
+            await onRefresh();
+            message.success(success);
+            return true;
+        } catch (error) {
+            message.error(readError(error));
+            return false;
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    const create = async (values: { username: string; displayName: string; password: string }) => {
+        if (await run(() => adminApi.createUser(values), "用户已创建")) {
+            setCreateOpen(false);
+            createForm.resetFields();
+        }
+    };
+
+    const edit = async (values: { displayName: string; disabled: boolean }) => {
+        if (!editingUser) return;
+        if (await run(() => adminApi.updateUser(editingUser.id, values), "用户信息已更新")) setEditingUser(null);
+    };
+
+    const resetPassword = async (values: { password: string }) => {
+        if (!resetUser) return;
+        if (await run(() => adminApi.resetUserPassword(resetUser.id, values.password), "密码已重置，用户需要重新登录")) {
+            setResetUser(null);
+            resetForm.resetFields();
+        }
+    };
+
+    const openEdit = (user: ManagedUser) => {
+        setEditingUser(user);
+        editForm.setFieldsValue({ displayName: user.displayName, disabled: user.disabled });
+    };
+
+    return (
+        <div>
+            <div className="mb-6 flex items-end justify-between gap-4">
+                <div>
+                    <h1 className="text-2xl font-semibold">用户管理</h1>
+                    <p className="mt-1 text-sm text-stone-500">创建创作端账号、停用访问权限或重置用户密码。</p>
+                </div>
+                <Button type="primary" icon={<UserPlus className="size-4" />} onClick={() => setCreateOpen(true)}>
+                    新建用户
+                </Button>
+            </div>
+            <Table
+                rowKey="id"
+                dataSource={users}
+                pagination={{ pageSize: 15 }}
+                columns={[
+                    {
+                        title: "用户",
+                        key: "identity",
+                        render: (_, user) => (
+                            <div>
+                                <div className="font-medium">{user.displayName}</div>
+                                <div className="text-xs text-stone-500">@{user.username}</div>
+                            </div>
+                        ),
+                    },
+                    { title: "状态", dataIndex: "disabled", width: 110, render: (disabled) => <Tag color={disabled ? "default" : "success"}>{disabled ? "已停用" : "正常"}</Tag> },
+                    { title: "上次登录", dataIndex: "lastLoginAt", width: 190, render: (value) => (value ? formatTime(value) : "从未登录") },
+                    { title: "创建时间", dataIndex: "createdAt", width: 190, render: formatTime },
+                    {
+                        title: "操作",
+                        key: "actions",
+                        width: 160,
+                        render: (_, user) => (
+                            <div className="flex gap-1">
+                                <Tooltip title="编辑">
+                                    <Button type="text" icon={<Pencil className="size-4" />} onClick={() => openEdit(user)} />
+                                </Tooltip>
+                                <Tooltip title="重置密码">
+                                    <Button type="text" icon={<RotateCcw className="size-4" />} onClick={() => setResetUser(user)} />
+                                </Tooltip>
+                                <Popconfirm title={`删除用户 ${user.username}？`} description="该用户的所有登录会话会立即失效。" onConfirm={() => void run(() => adminApi.deleteUser(user.id), "用户已删除")}>
+                                    <Tooltip title="删除">
+                                        <Button type="text" danger icon={<Trash2 className="size-4" />} />
+                                    </Tooltip>
+                                </Popconfirm>
+                            </div>
+                        ),
+                    },
+                ]}
+            />
+
+            <Modal title="新建创作用户" open={createOpen} onCancel={() => setCreateOpen(false)} footer={null} destroyOnHidden>
+                <Form form={createForm} layout="vertical" requiredMark={false} onFinish={(values) => void create(values)}>
+                    <Form.Item name="username" label="用户名" extra="3-32 位字母、数字、点、下划线或短横线" rules={[{ required: true }, { pattern: /^[a-zA-Z0-9_.-]{3,32}$/, message: "用户名格式不正确" }]}>
+                        <Input autoComplete="off" />
+                    </Form.Item>
+                    <Form.Item name="displayName" label="显示名称" rules={[{ required: true }]}>
+                        <Input />
+                    </Form.Item>
+                    <Form.Item name="password" label="初始密码" extra="至少 8 个字符" rules={[{ required: true }, { min: 8 }]}>
+                        <Input.Password autoComplete="new-password" />
+                    </Form.Item>
+                    <div className="flex justify-end gap-2">
+                        <Button onClick={() => setCreateOpen(false)}>取消</Button>
+                        <Button type="primary" htmlType="submit" loading={submitting}>
+                            创建用户
+                        </Button>
+                    </div>
+                </Form>
+            </Modal>
+
+            <Modal title={`编辑用户 · ${editingUser?.username || ""}`} open={Boolean(editingUser)} onCancel={() => setEditingUser(null)} footer={null} destroyOnHidden>
+                <Form form={editForm} layout="vertical" requiredMark={false} onFinish={(values) => void edit(values)}>
+                    <Form.Item name="displayName" label="显示名称" rules={[{ required: true }]}>
+                        <Input />
+                    </Form.Item>
+                    <Form.Item name="disabled" label="停用账号" valuePropName="checked" extra="停用后，该用户的已有会话会立即失效。">
+                        <Switch />
+                    </Form.Item>
+                    <div className="flex justify-end gap-2">
+                        <Button onClick={() => setEditingUser(null)}>取消</Button>
+                        <Button type="primary" htmlType="submit" loading={submitting}>
+                            保存
+                        </Button>
+                    </div>
+                </Form>
+            </Modal>
+
+            <Modal title={`重置密码 · ${resetUser?.username || ""}`} open={Boolean(resetUser)} onCancel={() => setResetUser(null)} footer={null} destroyOnHidden>
+                <Form form={resetForm} layout="vertical" requiredMark={false} onFinish={(values) => void resetPassword(values)}>
+                    <Form.Item name="password" label="新密码" extra="至少 8 个字符；保存后该用户需要重新登录" rules={[{ required: true }, { min: 8 }]}>
+                        <Input.Password autoComplete="new-password" />
+                    </Form.Item>
+                    <div className="flex justify-end gap-2">
+                        <Button onClick={() => setResetUser(null)}>取消</Button>
+                        <Button type="primary" htmlType="submit" loading={submitting}>
+                            重置密码
+                        </Button>
+                    </div>
+                </Form>
+            </Modal>
+        </div>
+    );
+}
+
 function AuditLogs({ logs }: { logs: AuditLog[] }) {
     return (
         <div>
@@ -494,7 +655,7 @@ function RequestTable({ rows }: { rows: DashboardData["recentRequests"] }) {
 }
 
 function sectionTitle(section: Section) {
-    return { overview: "运行概览", channels: "AI 渠道", defaults: "默认配置", audit: "审计日志", security: "账号安全" }[section];
+    return { overview: "运行概览", users: "用户管理", channels: "AI 渠道", defaults: "默认配置", audit: "审计日志", security: "账号安全" }[section];
 }
 function formatTime(value: string) {
     return new Date(value).toLocaleString("zh-CN", { hour12: false });

@@ -10,9 +10,11 @@ export type DashboardData = {
     configUpdatedAt: string;
     channelCount: number;
     modelCount: number;
+    userCount: number;
     recentRequests: Array<{ channel_id: string; method: string; path: string; status: number; duration_ms: number; created_at: string }>;
 };
 export type AuditLog = { id: number; username?: string; action: string; target: string; detail: string; ip: string; created_at: string };
+export type ManagedUser = { id: number; username: string; displayName: string; disabled: boolean; createdAt: string; updatedAt: string; lastLoginAt: string | null };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(path, {
@@ -33,5 +35,10 @@ export const adminApi = {
     config: () => request<{ config: AdminConfig }>("/api/admin/config"),
     saveConfig: (config: AdminConfig) => request<{ config: AdminConfig }>("/api/admin/config", { method: "PUT", body: JSON.stringify({ config }) }),
     auditLogs: () => request<{ logs: AuditLog[] }>("/api/admin/audit-logs?limit=100"),
+    users: () => request<{ users: ManagedUser[] }>("/api/admin/users"),
+    createUser: (input: { username: string; displayName: string; password: string }) => request<{ user: ManagedUser }>("/api/admin/users", { method: "POST", body: JSON.stringify(input) }),
+    updateUser: (id: number, input: { displayName: string; disabled: boolean }) => request<{ user: ManagedUser }>(`/api/admin/users/${id}`, { method: "PUT", body: JSON.stringify(input) }),
+    resetUserPassword: (id: number, password: string) => request<{ ok: true }>(`/api/admin/users/${id}/password`, { method: "PUT", body: JSON.stringify({ password }) }),
+    deleteUser: (id: number) => request<{ ok: true }>(`/api/admin/users/${id}`, { method: "DELETE" }),
     changePassword: (currentPassword: string, newPassword: string) => request<{ ok: true }>("/api/admin/password", { method: "PUT", body: JSON.stringify({ currentPassword, newPassword }) }),
 };

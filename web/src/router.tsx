@@ -1,6 +1,8 @@
 import { createBrowserRouter, Outlet } from "react-router-dom";
 
 import { AnalyticsTracker } from "@/components/layout/analytics-tracker";
+import { ProtectedUserRoute } from "@/components/auth/protected-user-route";
+import { BackendConfigBootstrap } from "@/components/layout/backend-config-bootstrap";
 import UserLayout from "@/layouts/user-layout";
 import AssetsPage from "@/pages/assets";
 import CanvasPage from "@/pages/canvas";
@@ -12,15 +14,21 @@ import NotFound from "@/pages/not-found";
 import PromptsPage from "@/pages/prompts";
 import VideoPage from "@/pages/video";
 import AdminPage from "@/pages/admin";
+import LoginPage from "@/pages/login";
 
 export const router = createBrowserRouter([
     { path: "/admin", element: <AdminPage /> },
+    { path: "/login", element: <LoginPage /> },
     {
         element: (
-            <UserLayout>
-                <AnalyticsTracker />
-                <Outlet />
-            </UserLayout>
+            <ProtectedUserRoute>
+                <BackendConfigBootstrap>
+                    <UserLayout>
+                        <AnalyticsTracker />
+                        <Outlet />
+                    </UserLayout>
+                </BackendConfigBootstrap>
+            </ProtectedUserRoute>
         ),
         children: [
             { path: "/", element: <HomePage /> },

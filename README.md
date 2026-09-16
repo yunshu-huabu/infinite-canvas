@@ -112,6 +112,8 @@ bun run dev
 
 前端打开 `http://localhost:3000`，管理员控制台位于 `http://localhost:3000/admin`。首次运行时，后端会在终端打印初始管理员密码；生产环境建议通过 `.env` 设置 `ADMIN_PASSWORD` 与 `CONFIG_ENCRYPTION_KEY`。
 
+创作端现在需要用户账号登录。管理员登录 `/admin` 后，可在「用户管理」中创建账号、停用用户或重置密码。用户登录入口为 `http://localhost:3000/login`。
+
 ### Docker 运行
 
 ```bash

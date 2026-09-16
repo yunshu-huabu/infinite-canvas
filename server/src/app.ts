@@ -2,11 +2,13 @@ import { existsSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve, sep } from "node:path";
 
 import { adminConfig, normalizeManagedConfig, publicConfig } from "./config";
-import { AppDatabase, type AdminUser } from "./database";
+import { AppDatabase, type AdminUser, type AppUser } from "./database";
 import { hashToken, loadEncryptionKey, randomToken } from "./security";
 
 const SESSION_COOKIE = "canvas_admin_session";
+const USER_SESSION_COOKIE = "canvas_user_session";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const USER_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 
 export type AppOptions = {
@@ -34,15 +36,20 @@ export async function createApp(options: AppOptions = {}) {
     }
 
     const staticDir = resolve(options.staticDir || process.env.STATIC_DIR || "web/dist");
-    const production = options.production ?? process.env.NODE_ENV === "production";
-
     const fetch = async (request: Request) => {
         const url = new URL(request.url);
         try {
             if (url.pathname === "/api/health" && request.method === "GET") return json({ ok: true, version: "0.1.0" });
-            if (url.pathname === "/api/config" && request.method === "GET") return json({ config: publicConfig(db.getConfig()) }, 200, { "cache-control": "no-store" });
-            if (url.pathname.startsWith("/api/admin/")) return handleAdmin(request, url, db, production);
-            if (url.pathname.startsWith("/api/ai/channels/")) return handleAiProxy(request, url, db);
+            if (url.pathname.startsWith("/api/auth/")) return handleUserAuth(request, url, db);
+            if (url.pathname.startsWith("/api/admin/")) return handleAdmin(request, url, db);
+            const userAuth = authenticateUser(request, db);
+            if (url.pathname === "/api/config" && request.method === "GET")
+                return userAuth
+                    ? json({ config: publicConfig(db.getConfig()) }, 200, {
+                          "cache-control": "no-store",
+                      })
+                    : json({ error: "需要用户登录" }, 401);
+            if (url.pathname.startsWith("/api/ai/channels/")) return userAuth ? handleAiProxy(request, url, db) : json({ error: "需要用户登录" }, 401);
             if (url.pathname.startsWith("/api/")) return json({ error: "接口不存在" }, 404);
             if (url.pathname === "/config.js") return runtimeConfig();
             return serveStatic(url.pathname, staticDir);
@@ -55,7 +62,7 @@ export async function createApp(options: AppOptions = {}) {
     return { fetch, db, initialPassword, adminUsername };
 }
 
-async function handleAdmin(request: Request, url: URL, db: AppDatabase, production: boolean) {
+async function handleAdmin(request: Request, url: URL, db: AppDatabase) {
     const ip = clientIp(request);
     if (request.method !== "GET" && !validOrigin(request, url)) return json({ error: "请求来源校验失败" }, 403);
 
@@ -76,7 +83,9 @@ async function handleAdmin(request: Request, url: URL, db: AppDatabase, producti
         db.createSession(hashToken(token), admin.id, expiresAt.toISOString());
         db.touchLogin(admin.id);
         db.audit(admin.id, "admin.login", "session", {}, ip);
-        return json({ user: safeAdmin(admin) }, 200, { "set-cookie": sessionCookie(token, expiresAt, production) });
+        return json({ user: safeAdmin(admin) }, 200, {
+            "set-cookie": sessionCookie(token, expiresAt, secureRequest(request)),
+        });
     }
 
     const auth = authenticate(request, db);
@@ -86,13 +95,23 @@ async function handleAdmin(request: Request, url: URL, db: AppDatabase, producti
     if (url.pathname === "/api/admin/logout" && request.method === "POST") {
         db.deleteSession(auth.tokenHash);
         db.audit(auth.admin.id, "admin.logout", "session", {}, ip);
-        return json({ ok: true }, 200, { "set-cookie": clearSessionCookie(production) });
+        return json({ ok: true }, 200, {
+            "set-cookie": clearSessionCookie(secureRequest(request)),
+        });
     }
     if (url.pathname === "/api/admin/dashboard" && request.method === "GET") {
         const config = db.getConfig();
-        return json({ ...db.dashboard(), channelCount: config.channels.length, modelCount: config.channels.reduce((sum, channel) => sum + channel.models.length, 0) });
+        return json({
+            ...db.dashboard(),
+            userCount: db.userCount(),
+            channelCount: config.channels.length,
+            modelCount: config.channels.reduce((sum, channel) => sum + channel.models.length, 0),
+        });
     }
-    if (url.pathname === "/api/admin/config" && request.method === "GET") return json({ config: adminConfig(db.getConfig()) }, 200, { "cache-control": "no-store" });
+    if (url.pathname === "/api/admin/config" && request.method === "GET")
+        return json({ config: adminConfig(db.getConfig()) }, 200, {
+            "cache-control": "no-store",
+        });
     if (url.pathname === "/api/admin/config" && request.method === "PUT") {
         const body = await readJson<{ config?: unknown }>(request);
         const previous = db.getConfig();
@@ -103,15 +122,139 @@ async function handleAdmin(request: Request, url: URL, db: AppDatabase, producti
         return json({ config: adminConfig(config) });
     }
     if (url.pathname === "/api/admin/password" && request.method === "PUT") {
-        const body = await readJson<{ currentPassword?: string; newPassword?: string }>(request);
+        const body = await readJson<{
+            currentPassword?: string;
+            newPassword?: string;
+        }>(request);
         if (!body.currentPassword || !(await Bun.password.verify(body.currentPassword, auth.admin.password_hash))) return json({ error: "当前密码不正确" }, 400);
         if (!body.newPassword || body.newPassword.length < 12) return json({ error: "新密码至少需要 12 个字符" }, 400);
         db.updatePassword(auth.admin.id, await Bun.password.hash(body.newPassword, { algorithm: "argon2id" }));
         db.audit(auth.admin.id, "admin.password_change", "admin", {}, ip);
-        return json({ ok: true }, 200, { "set-cookie": clearSessionCookie(production) });
+        return json({ ok: true }, 200, {
+            "set-cookie": clearSessionCookie(secureRequest(request)),
+        });
     }
-    if (url.pathname === "/api/admin/audit-logs" && request.method === "GET") return json({ logs: db.audits(Number(url.searchParams.get("limit")) || 100) });
+    if (url.pathname === "/api/admin/audit-logs" && request.method === "GET")
+        return json({
+            logs: db.audits(Number(url.searchParams.get("limit")) || 100),
+        });
+    if (url.pathname === "/api/admin/users" && request.method === "GET") return json({ users: db.users().map(safeUser) });
+    if (url.pathname === "/api/admin/users" && request.method === "POST") {
+        const body = await readJson<{
+            username?: string;
+            displayName?: string;
+            password?: string;
+        }>(request);
+        let username: string;
+        try {
+            username = normalizeUsername(body.username);
+            validateUserPassword(body.password);
+        } catch (error) {
+            return json({ error: error instanceof Error ? error.message : "用户信息不正确" }, 400);
+        }
+        const displayName = String(body.displayName || username)
+            .trim()
+            .slice(0, 64);
+        if (!displayName) return json({ error: "显示名称不能为空" }, 400);
+        try {
+            const user = db.createUser(username, displayName, await Bun.password.hash(body.password!, { algorithm: "argon2id" }));
+            db.audit(auth.admin.id, "user.create", `user:${user.id}`, { username }, ip);
+            return json({ user: safeUser(user as AppUser) }, 201);
+        } catch (error) {
+            if (String(error).toLowerCase().includes("unique")) return json({ error: "用户名已存在" }, 409);
+            throw error;
+        }
+    }
+    const userMatch = url.pathname.match(/^\/api\/admin\/users\/(\d+)(?:\/(password))?$/);
+    if (userMatch) {
+        const userId = Number(userMatch[1]);
+        const target = db.findUserById(userId);
+        if (!target) return json({ error: "用户不存在" }, 404);
+        if (userMatch[2] === "password" && request.method === "PUT") {
+            const body = await readJson<{ password?: string }>(request);
+            try {
+                validateUserPassword(body.password);
+            } catch (error) {
+                return json({ error: error instanceof Error ? error.message : "密码不符合要求" }, 400);
+            }
+            db.updateUserPassword(userId, await Bun.password.hash(body.password!, { algorithm: "argon2id" }));
+            db.audit(auth.admin.id, "user.password_reset", `user:${userId}`, { username: target.username }, ip);
+            return json({ ok: true });
+        }
+        if (!userMatch[2] && request.method === "PUT") {
+            const body = await readJson<{ displayName?: string; disabled?: boolean }>(request);
+            const displayName = String(body.displayName || target.display_name)
+                .trim()
+                .slice(0, 64);
+            if (!displayName) return json({ error: "显示名称不能为空" }, 400);
+            const user = db.updateUser(userId, displayName, Boolean(body.disabled));
+            db.audit(auth.admin.id, body.disabled ? "user.disable" : "user.update", `user:${userId}`, { username: target.username }, ip);
+            return json({ user: safeUser(user!) });
+        }
+        if (!userMatch[2] && request.method === "DELETE") {
+            db.deleteUser(userId);
+            db.audit(auth.admin.id, "user.delete", `user:${userId}`, { username: target.username }, ip);
+            return json({ ok: true });
+        }
+    }
     return json({ error: "管理接口不存在" }, 404);
+}
+
+async function handleUserAuth(request: Request, url: URL, db: AppDatabase) {
+    const ip = clientIp(request);
+    if (request.method !== "GET" && !validOrigin(request, url)) return json({ error: "请求来源校验失败" }, 403);
+
+    if (url.pathname === "/api/auth/login" && request.method === "POST") {
+        const attemptKey = `user:${ip}`;
+        const rate = loginAttempts.get(attemptKey);
+        if (rate && rate.resetAt > Date.now() && rate.count >= 10) return json({ error: "登录尝试过多，请稍后再试" }, 429);
+        const body = await readJson<{ username?: string; password?: string }>(request);
+        const user = body.username ? db.findUser(body.username.trim()) : null;
+        const valid = Boolean(user && !user.disabled && body.password && (await Bun.password.verify(body.password, user.password_hash)));
+        if (!valid || !user) {
+            recordFailedLogin(attemptKey);
+            db.audit(null, "user.login_failed", "user_session", { username: body.username || "" }, ip);
+            return json({ error: user?.disabled ? "账号已被停用" : "用户名或密码错误" }, 401);
+        }
+        loginAttempts.delete(attemptKey);
+        const token = randomToken();
+        const expiresAt = new Date(Date.now() + USER_SESSION_TTL_MS);
+        db.createUserSession(hashToken(token), user.id, expiresAt.toISOString());
+        db.touchUserLogin(user.id);
+        db.audit(null, "user.login", `user:${user.id}`, { username: user.username }, ip);
+        return json({ user: safeUser(user) }, 200, {
+            "set-cookie": userSessionCookie(token, expiresAt, secureRequest(request)),
+        });
+    }
+
+    const auth = authenticateUser(request, db);
+    if (!auth) return json({ error: "需要用户登录" }, 401);
+    if (url.pathname === "/api/auth/session" && request.method === "GET") return json({ user: safeUser(auth.user) });
+    if (url.pathname === "/api/auth/logout" && request.method === "POST") {
+        db.deleteUserSession(auth.tokenHash);
+        db.audit(null, "user.logout", `user:${auth.user.id}`, { username: auth.user.username }, ip);
+        return json({ ok: true }, 200, {
+            "set-cookie": clearUserSessionCookie(secureRequest(request)),
+        });
+    }
+    if (url.pathname === "/api/auth/password" && request.method === "PUT") {
+        const body = await readJson<{
+            currentPassword?: string;
+            newPassword?: string;
+        }>(request);
+        if (!body.currentPassword || !(await Bun.password.verify(body.currentPassword, auth.user.password_hash))) return json({ error: "当前密码不正确" }, 400);
+        try {
+            validateUserPassword(body.newPassword);
+        } catch (error) {
+            return json({ error: error instanceof Error ? error.message : "密码不符合要求" }, 400);
+        }
+        db.updateUserPassword(auth.user.id, await Bun.password.hash(body.newPassword!, { algorithm: "argon2id" }));
+        db.audit(null, "user.password_change", `user:${auth.user.id}`, { username: auth.user.username }, ip);
+        return json({ ok: true }, 200, {
+            "set-cookie": clearUserSessionCookie(secureRequest(request)),
+        });
+    }
+    return json({ error: "用户接口不存在" }, 404);
 }
 
 async function handleAiProxy(request: Request, url: URL, db: AppDatabase) {
@@ -147,7 +290,11 @@ async function handleAiProxy(request: Request, url: URL, db: AppDatabase) {
         const responseHeaders = new Headers(upstream.headers);
         for (const name of ["content-encoding", "content-length", "transfer-encoding", "set-cookie", "access-control-allow-origin"]) responseHeaders.delete(name);
         responseHeaders.set("x-canvas-channel", channel.id);
-        return new Response(upstream.body, { status, statusText: upstream.statusText, headers: responseHeaders });
+        return new Response(upstream.body, {
+            status,
+            statusText: upstream.statusText,
+            headers: responseHeaders,
+        });
     } catch (error) {
         return json({ error: error instanceof Error ? error.message : "AI 上游请求失败" }, 502);
     } finally {
@@ -163,8 +310,33 @@ function authenticate(request: Request, db: AppDatabase) {
     return admin ? { admin, tokenHash } : null;
 }
 
+function authenticateUser(request: Request, db: AppDatabase) {
+    const token = parseCookies(request.headers.get("cookie") || "")[USER_SESSION_COOKIE];
+    if (!token) return null;
+    const tokenHash = hashToken(token);
+    const user = db.sessionUser(tokenHash);
+    return user ? { user, tokenHash } : null;
+}
+
 function safeAdmin(admin: AdminUser) {
-    return { id: admin.id, username: admin.username, createdAt: admin.created_at, lastLoginAt: admin.last_login_at };
+    return {
+        id: admin.id,
+        username: admin.username,
+        createdAt: admin.created_at,
+        lastLoginAt: admin.last_login_at,
+    };
+}
+
+function safeUser(user: AppUser | Omit<AppUser, "password_hash">) {
+    return {
+        id: user.id,
+        username: user.username,
+        displayName: user.display_name,
+        disabled: Boolean(user.disabled),
+        createdAt: user.created_at,
+        updatedAt: user.updated_at,
+        lastLoginAt: user.last_login_at,
+    };
 }
 
 function sessionCookie(token: string, expiresAt: Date, secure: boolean) {
@@ -173,6 +345,18 @@ function sessionCookie(token: string, expiresAt: Date, secure: boolean) {
 
 function clearSessionCookie(secure: boolean) {
     return `${SESSION_COOKIE}=; Path=/api/admin; HttpOnly; SameSite=Strict; Max-Age=0${secure ? "; Secure" : ""}`;
+}
+
+function userSessionCookie(token: string, expiresAt: Date, secure: boolean) {
+    return `${USER_SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Expires=${expiresAt.toUTCString()}${secure ? "; Secure" : ""}`;
+}
+
+function clearUserSessionCookie(secure: boolean) {
+    return `${USER_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure ? "; Secure" : ""}`;
+}
+
+function secureRequest(request: Request) {
+    return request.headers.get("x-forwarded-proto")?.split(",")[0].trim() === "https" || new URL(request.url).protocol === "https:";
 }
 
 function parseCookies(value: string) {
@@ -215,6 +399,16 @@ function recordFailedLogin(ip: string) {
     loginAttempts.set(ip, current && current.resetAt > Date.now() ? { ...current, count: current.count + 1 } : { count: 1, resetAt: Date.now() + 15 * 60 * 1000 });
 }
 
+function normalizeUsername(value: unknown) {
+    const username = String(value || "").trim();
+    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(username)) throw new Error("用户名需为 3-32 位字母、数字、点、下划线或短横线");
+    return username;
+}
+
+function validateUserPassword(value: unknown) {
+    if (typeof value !== "string" || value.length < 8) throw new Error("用户密码至少需要 8 个字符");
+}
+
 function assertUniqueChannels(ids: string[]) {
     if (new Set(ids).size !== ids.length) throw new Error("渠道 ID 不能重复");
 }
@@ -237,7 +431,12 @@ function joinUpstreamUrl(baseUrl: string, path: string, search: string) {
 function runtimeConfig() {
     const clean = (value: string | undefined) => (value || "").replace(/[^A-Za-z0-9-]/g, "");
     const script = `window.__RUNTIME_CONFIG__ = ${JSON.stringify({ ANALYTICS_GA4_ID: clean(process.env.ANALYTICS_GA4_ID), ANALYTICS_BAIDU_ID: clean(process.env.ANALYTICS_BAIDU_ID) })};`;
-    return new Response(script, { headers: { "content-type": "application/javascript; charset=utf-8", "cache-control": "no-store" } });
+    return new Response(script, {
+        headers: {
+            "content-type": "application/javascript; charset=utf-8",
+            "cache-control": "no-store",
+        },
+    });
 }
 
 function serveStatic(pathname: string, staticDir: string) {
@@ -247,7 +446,9 @@ function serveStatic(pathname: string, staticDir: string) {
     const candidate = resolve(staticDir, relative || "index.html");
     const insideStaticDir = candidate === staticDir || candidate.startsWith(`${staticDir}${sep}`);
     const filePath = insideStaticDir && existsSync(candidate) && statSync(candidate).isFile() ? candidate : join(staticDir, "index.html");
-    const headers: Record<string, string> = { "content-type": mimeType(filePath) };
+    const headers: Record<string, string> = {
+        "content-type": mimeType(filePath),
+    };
     if (filePath.endsWith("index.html")) headers["cache-control"] = "no-cache";
     else if (/\.[a-f0-9]{8,}\./i.test(filePath)) headers["cache-control"] = "public, max-age=31536000, immutable";
     return new Response(Bun.file(filePath), { headers });
@@ -272,5 +473,8 @@ function mimeType(path: string) {
 }
 
 function json(value: unknown, status = 200, headers: Record<string, string> = {}) {
-    return Response.json(value, { status, headers: { "cache-control": "no-store", ...headers } });
+    return Response.json(value, {
+        status,
+        headers: { "cache-control": "no-store", ...headers },
+    });
 }

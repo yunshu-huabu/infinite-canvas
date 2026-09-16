@@ -6,7 +6,6 @@ import "./styles/globals.css";
 import { RouterProvider } from "react-router-dom";
 
 import { AppProviders } from "@/components/layout/app-providers";
-import { BackendConfigBootstrap } from "@/components/layout/backend-config-bootstrap";
 import "@/i18n";
 import { initAnalytics } from "@/lib/analytics";
 import { router } from "@/router";
@@ -18,9 +17,7 @@ document.body.style.fontFamily = '"SF Pro Display","SF Pro Text","PingFang SC","
 createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
         <AppProviders>
-            <BackendConfigBootstrap>
-                <RouterProvider router={router} />
-            </BackendConfigBootstrap>
+            <RouterProvider router={router} />
         </AppProviders>
     </React.StrictMode>,
 );

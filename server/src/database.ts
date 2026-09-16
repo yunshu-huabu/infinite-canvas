@@ -5,7 +5,24 @@ import { dirname } from "node:path";
 import { defaultManagedConfig, normalizeManagedConfig, type ManagedAiConfig } from "./config";
 import { decryptJson, encryptJson } from "./security";
 
-export type AdminUser = { id: number; username: string; password_hash: string; created_at: string; updated_at: string; last_login_at: string | null };
+export type AdminUser = {
+    id: number;
+    username: string;
+    password_hash: string;
+    created_at: string;
+    updated_at: string;
+    last_login_at: string | null;
+};
+export type AppUser = {
+    id: number;
+    username: string;
+    display_name: string;
+    password_hash: string;
+    disabled: number;
+    created_at: string;
+    updated_at: string;
+    last_login_at: string | null;
+};
 
 export class AppDatabase {
     readonly sqlite: Database;
@@ -36,6 +53,22 @@ export class AppDatabase {
                 expires_at TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                display_name TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                disabled INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_login_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                token_hash TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
@@ -62,6 +95,7 @@ export class AppDatabase {
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires_at);
+            CREATE INDEX IF NOT EXISTS user_sessions_expires_idx ON user_sessions(expires_at);
             CREATE INDEX IF NOT EXISTS audit_created_idx ON audit_logs(created_at DESC);
             CREATE INDEX IF NOT EXISTS requests_created_idx ON api_requests(created_at DESC);
         `);
@@ -73,7 +107,13 @@ export class AppDatabase {
     }
 
     adminCount() {
-        return Number((this.sqlite.query("SELECT COUNT(*) AS count FROM admins").get() as { count: number }).count);
+        return Number(
+            (
+                this.sqlite.query("SELECT COUNT(*) AS count FROM admins").get() as {
+                    count: number;
+                }
+            ).count,
+        );
     }
 
     createAdmin(username: string, passwordHash: string) {
@@ -115,6 +155,70 @@ export class AppDatabase {
         this.sqlite.query("DELETE FROM sessions WHERE token_hash = ?").run(tokenHash);
     }
 
+    userCount() {
+        return Number(
+            (
+                this.sqlite.query("SELECT COUNT(*) AS count FROM users").get() as {
+                    count: number;
+                }
+            ).count,
+        );
+    }
+
+    createUser(username: string, displayName: string, passwordHash: string) {
+        const now = new Date().toISOString();
+        return this.sqlite
+            .query("INSERT INTO users (username, display_name, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?) RETURNING id, username, display_name, disabled, created_at, updated_at, last_login_at")
+            .get(username, displayName, passwordHash, now, now) as Omit<AppUser, "password_hash">;
+    }
+
+    users() {
+        return this.sqlite.query("SELECT id, username, display_name, disabled, created_at, updated_at, last_login_at FROM users ORDER BY id DESC").all();
+    }
+
+    findUser(username: string) {
+        return this.sqlite.query("SELECT * FROM users WHERE username = ? COLLATE NOCASE").get(username) as AppUser | null;
+    }
+
+    findUserById(id: number) {
+        return this.sqlite.query("SELECT * FROM users WHERE id = ?").get(id) as AppUser | null;
+    }
+
+    updateUser(id: number, displayName: string, disabled: boolean) {
+        this.sqlite.query("UPDATE users SET display_name = ?, disabled = ?, updated_at = ? WHERE id = ?").run(displayName, disabled ? 1 : 0, new Date().toISOString(), id);
+        if (disabled) this.sqlite.query("DELETE FROM user_sessions WHERE user_id = ?").run(id);
+        return this.findUserById(id);
+    }
+
+    updateUserPassword(id: number, passwordHash: string) {
+        this.sqlite.query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?").run(passwordHash, new Date().toISOString(), id);
+        this.sqlite.query("DELETE FROM user_sessions WHERE user_id = ?").run(id);
+    }
+
+    deleteUser(id: number) {
+        return this.sqlite.query("DELETE FROM users WHERE id = ?").run(id).changes > 0;
+    }
+
+    touchUserLogin(id: number) {
+        this.sqlite.query("UPDATE users SET last_login_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+    }
+
+    createUserSession(tokenHash: string, userId: number, expiresAt: string) {
+        const now = new Date().toISOString();
+        this.sqlite.query("DELETE FROM user_sessions WHERE expires_at <= ?").run(now);
+        this.sqlite.query("INSERT INTO user_sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)").run(tokenHash, userId, expiresAt, now);
+    }
+
+    sessionUser(tokenHash: string) {
+        return this.sqlite
+            .query("SELECT users.* FROM user_sessions JOIN users ON users.id = user_sessions.user_id WHERE user_sessions.token_hash = ? AND user_sessions.expires_at > ? AND users.disabled = 0")
+            .get(tokenHash, new Date().toISOString()) as AppUser | null;
+    }
+
+    deleteUserSession(tokenHash: string) {
+        this.sqlite.query("DELETE FROM user_sessions WHERE token_hash = ?").run(tokenHash);
+    }
+
     getConfig() {
         const row = this.sqlite.query("SELECT value FROM settings WHERE key = 'ai_config'").get() as { value: string } | null;
         return row ? normalizeManagedConfig(decryptJson<ManagedAiConfig>(row.value, this.encryptionKey)) : defaultManagedConfig;
@@ -123,7 +227,9 @@ export class AppDatabase {
     setConfig(config: ManagedAiConfig, adminId: number | null) {
         const value = encryptJson(config, this.encryptionKey);
         this.sqlite
-            .query("INSERT INTO settings (key, value, encrypted, updated_by, updated_at) VALUES ('ai_config', ?, 1, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at")
+            .query(
+                "INSERT INTO settings (key, value, encrypted, updated_by, updated_at) VALUES ('ai_config', ?, 1, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+            )
             .run(value, adminId, new Date().toISOString());
     }
 
@@ -152,6 +258,12 @@ export class AppDatabase {
         };
         const recent = this.sqlite.query("SELECT channel_id, method, path, status, duration_ms, created_at FROM api_requests ORDER BY id DESC LIMIT 12").all();
         const setting = this.sqlite.query("SELECT updated_at FROM settings WHERE key = 'ai_config'").get() as { updated_at: string };
-        return { requests24h: requests.total || 0, failed24h: requests.failed || 0, averageMs24h: requests.average_ms || 0, configUpdatedAt: setting.updated_at, recentRequests: recent };
+        return {
+            requests24h: requests.total || 0,
+            failed24h: requests.failed || 0,
+            averageMs24h: requests.average_ms || 0,
+            configUpdatedAt: setting.updated_at,
+            recentRequests: recent,
+        };
     }
 }

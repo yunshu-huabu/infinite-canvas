@@ -4,11 +4,11 @@
     "private": true,
     "type": "module",
     "scripts": {
-        "dev": "vite --host 0.0.0.0 --port 3000",
+        "dev": "vite --host 127.0.0.1 --port 3000",
         "build": "vite build",
         "typecheck": "tsc --noEmit",
-        "test": "bun test src/services/backend-config.test.ts src/lib/auth-navigation.test.ts src/components/layout/user-account-menu-items.test.ts",
-        "start": "vite preview --host 0.0.0.0 --port 3000",
+        "test": "bun test src/services/backend-config.test.ts src/lib/auth-navigation.test.ts src/lib/local-access.test.ts src/components/layout/user-account-menu-items.test.ts",
+        "start": "vite preview --host 127.0.0.1 --port 3000",
         "format": "prettier --write .",
         "format:check": "prettier --check ."
     },

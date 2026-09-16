@@ -1,5 +1,5 @@
 import { App, Button, Form, Input, Modal, Popconfirm, Select, Spin, Switch, Table, Tag, Tooltip } from "antd";
-import { Activity, ArrowLeft, AudioLines, BookOpenCheck, Boxes, Gauge, Image, KeyRound, LogOut, Pencil, Plus, RefreshCw, Save, Settings2, ShieldCheck, Trash2, UserCheck, UserRound, Users, UserX, Video } from "lucide-react";
+import { Activity, ArrowLeft, AudioLines, BookOpenCheck, Boxes, CloudDownload, Gauge, Image, KeyRound, LogOut, Pencil, Plus, RefreshCw, Save, Settings2, ShieldCheck, Trash2, UserCheck, UserRound, Users, UserX, Video } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -7,6 +7,7 @@ import { adminApi, type AdminConfig, type AdminUser, type AuditLog, type Dashboa
 import { createModelChannel, encodeChannelModel, type ModelCapability } from "@/stores/use-config-store";
 
 import { getManagedUserPresentation, getNextDisabledState } from "./user-management";
+import { mergeUpstreamModels } from "./channel-models";
 
 type Section = "overview" | "users" | "channels" | "defaults" | "audit" | "security";
 
@@ -226,9 +227,35 @@ function Overview({ data, onRefresh }: { data: DashboardData; onRefresh: () => v
 }
 
 function ChannelsEditor({ config, onChange }: { config: AdminConfig; onChange: (config: AdminConfig) => void }) {
+    const { message } = App.useApp();
+    const [fetchingIndex, setFetchingIndex] = useState<number | null>(null);
     const updateChannel = (index: number, patch: Partial<AdminConfig["channels"][number]>) => onChange({ ...config, channels: config.channels.map((channel, itemIndex) => (itemIndex === index ? { ...channel, ...patch } : channel)) });
     const addChannel = () => onChange({ ...config, channels: [...config.channels, { ...createModelChannel({ name: `渠道 ${config.channels.length + 1}` }), hasApiKey: false }] });
     const deleteChannel = (index: number) => onChange({ ...config, channels: config.channels.filter((_, itemIndex) => itemIndex !== index) });
+    const fetchModels = async (index: number) => {
+        const channel = config.channels[index];
+        if (!channel.baseUrl.trim()) {
+            message.error("请先填写 Base URL");
+            return;
+        }
+        setFetchingIndex(index);
+        try {
+            const result = await adminApi.fetchChannelModels({
+                channelId: channel.id,
+                baseUrl: channel.baseUrl,
+                apiKey: channel.apiKey,
+                apiFormat: channel.apiFormat,
+                useStoredApiKey: Boolean(channel.hasApiKey && !channel.clearApiKey && !channel.apiKey),
+            });
+            const merged = mergeUpstreamModels(channel.models, result.models);
+            updateChannel(index, { models: merged.models });
+            message.success(`获取到 ${result.models.length} 个上游模型，新增 ${merged.addedCount} 个`);
+        } catch (error) {
+            message.error(readError(error));
+        } finally {
+            setFetchingIndex(null);
+        }
+    };
     return (
         <div>
             <div className="mb-6 flex items-end justify-between">
@@ -236,7 +263,7 @@ function ChannelsEditor({ config, onChange }: { config: AdminConfig; onChange: (
                     <h1 className="text-2xl font-semibold">AI 渠道</h1>
                     <p className="mt-1 text-sm text-stone-500">密钥只在服务端加密保存，前端请求经对应渠道代理转发。</p>
                 </div>
-                <Button icon={<Plus className="size-4" />} onClick={addChannel}>
+                <Button icon={<Plus className="size-4" />} disabled={fetchingIndex !== null} onClick={addChannel}>
                     新增渠道
                 </Button>
             </div>
@@ -250,8 +277,8 @@ function ChannelsEditor({ config, onChange }: { config: AdminConfig; onChange: (
                                     {channel.apiFormat.toUpperCase()} · {channel.models.length} 个模型 · {channel.hasApiKey ? "密钥已保存" : "未配置密钥"}
                                 </div>
                             </div>
-                            <Popconfirm title="删除这个渠道？" disabled={config.channels.length <= 1} onConfirm={() => deleteChannel(index)}>
-                                <Button danger type="text" disabled={config.channels.length <= 1} icon={<Trash2 className="size-4" />} />
+                            <Popconfirm title="删除这个渠道？" disabled={config.channels.length <= 1 || fetchingIndex !== null} onConfirm={() => deleteChannel(index)}>
+                                <Button danger type="text" disabled={config.channels.length <= 1 || fetchingIndex !== null} icon={<Trash2 className="size-4" />} />
                             </Popconfirm>
                         </div>
                         <div className="grid gap-4 p-5 md:grid-cols-2 xl:grid-cols-4">
@@ -292,9 +319,16 @@ function ChannelsEditor({ config, onChange }: { config: AdminConfig; onChange: (
                         <div className="border-t border-stone-200 dark:border-stone-800">
                             <div className="flex items-center justify-between px-5 py-3">
                                 <span className="text-sm font-semibold">模型列表</span>
-                                <Button size="small" icon={<Plus className="size-3.5" />} onClick={() => updateChannel(index, { models: [...channel.models, { name: "", capability: "text" }] })}>
-                                    添加模型
-                                </Button>
+                                <div className="flex items-center gap-2">
+                                    <Tooltip title="从渠道的模型接口读取并合并模型列表">
+                                        <Button size="small" icon={<CloudDownload className="size-3.5" />} loading={fetchingIndex === index} disabled={fetchingIndex !== null && fetchingIndex !== index} onClick={() => void fetchModels(index)}>
+                                            获取上游模型
+                                        </Button>
+                                    </Tooltip>
+                                    <Button size="small" icon={<Plus className="size-3.5" />} onClick={() => updateChannel(index, { models: [...channel.models, { name: "", capability: "text" }] })}>
+                                        添加模型
+                                    </Button>
+                                </div>
                             </div>
                             <div className="divide-y divide-stone-200 border-t border-stone-200 dark:divide-stone-800 dark:border-stone-800">
                                 {channel.models.map((model, modelIndex) => (

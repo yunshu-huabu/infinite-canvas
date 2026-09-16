@@ -34,6 +34,8 @@ export const adminApi = {
     dashboard: () => request<DashboardData>("/api/admin/dashboard"),
     config: () => request<{ config: AdminConfig }>("/api/admin/config"),
     saveConfig: (config: AdminConfig) => request<{ config: AdminConfig }>("/api/admin/config", { method: "PUT", body: JSON.stringify({ config }) }),
+    fetchChannelModels: (input: { channelId: string; baseUrl: string; apiKey: string; apiFormat: "openai" | "gemini"; useStoredApiKey: boolean }) =>
+        request<{ models: string[] }>("/api/admin/channels/models", { method: "POST", body: JSON.stringify(input) }),
     auditLogs: () => request<{ logs: AuditLog[] }>("/api/admin/audit-logs?limit=100"),
     users: () => request<{ users: ManagedUser[] }>("/api/admin/users"),
     createUser: (input: { username: string; displayName: string; password: string }) => request<{ user: ManagedUser }>("/api/admin/users", { method: "POST", body: JSON.stringify(input) }),

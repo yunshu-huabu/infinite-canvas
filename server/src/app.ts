@@ -4,6 +4,7 @@ import { extname, join, normalize, resolve, sep } from "node:path";
 import { adminConfig, normalizeManagedConfig, publicConfig } from "./config";
 import { AppDatabase, type AdminUser, type AppUser } from "./database";
 import { hashToken, loadEncryptionKey, randomToken } from "./security";
+import { fetchUpstreamModels, normalizeBaseUrl, type UpstreamApiFormat } from "./upstream-models";
 
 const SESSION_COOKIE = "canvas_admin_session";
 const USER_SESSION_COOKIE = "canvas_user_session";
@@ -120,6 +121,39 @@ async function handleAdmin(request: Request, url: URL, db: AppDatabase) {
         db.setConfig(config, auth.admin.id);
         db.audit(auth.admin.id, "config.update", "ai_config", summarizeConfig(previous, config), ip);
         return json({ config: adminConfig(config) });
+    }
+    if (url.pathname === "/api/admin/channels/models" && request.method === "POST") {
+        const body = await readJson<{
+            channelId?: string;
+            baseUrl?: string;
+            apiKey?: string;
+            apiFormat?: UpstreamApiFormat;
+            useStoredApiKey?: boolean;
+        }>(request);
+        const channelId = String(body.channelId || "").trim();
+        const apiFormat: UpstreamApiFormat = body.apiFormat === "gemini" ? "gemini" : "openai";
+        let baseUrl: string;
+        try {
+            baseUrl = normalizeBaseUrl(String(body.baseUrl || ""));
+        } catch (error) {
+            return json({ error: error instanceof Error ? error.message : "Base URL 格式不正确" }, 400);
+        }
+
+        let apiKey = String(body.apiKey || "").trim();
+        if (!apiKey && body.useStoredApiKey) {
+            const stored = db.getConfig().channels.find((channel) => channel.id === channelId);
+            if (!stored) return json({ error: "未找到已保存的渠道，请先保存配置或输入 API Key" }, 400);
+            if (normalizeBaseUrl(stored.baseUrl) !== baseUrl || stored.apiFormat !== apiFormat) return json({ error: "渠道地址或协议已修改，请先保存配置或重新输入 API Key" }, 400);
+            apiKey = stored.apiKey;
+        }
+
+        try {
+            const models = await fetchUpstreamModels({ baseUrl, apiKey, apiFormat });
+            db.audit(auth.admin.id, "channel.models_fetch", `channel:${channelId || "unsaved"}`, { count: models.length, apiFormat }, ip);
+            return json({ models });
+        } catch (error) {
+            return json({ error: error instanceof Error ? error.message : "获取上游模型失败" }, 502);
+        }
     }
     if (url.pathname === "/api/admin/password" && request.method === "PUT") {
         const body = await readJson<{

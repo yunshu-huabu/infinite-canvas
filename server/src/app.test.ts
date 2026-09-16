@@ -213,6 +213,97 @@ describe("managed configuration", () => {
             upstream.stop(true);
         }
     });
+    test("fetches and sorts OpenAI-compatible models with the stored credential", async () => {
+        let receivedAuthorization = "";
+        const upstream = Bun.serve({
+            port: 0,
+            fetch(request) {
+                receivedAuthorization = request.headers.get("authorization") || "";
+                expect(new URL(request.url).pathname).toBe("/v1/models");
+                return Response.json({ data: [{ id: "model-z" }, { id: "model-a" }, { id: "model-a" }] });
+            },
+        });
+        try {
+            const config = app.db.getConfig();
+            config.channels[0].baseUrl = `http://127.0.0.1:${upstream.port}`;
+            config.channels[0].apiKey = "sk-stored-model-key";
+            app.db.setConfig(config, null);
+            const { cookie } = await login();
+            const response = await app.fetch(
+                new Request("http://localhost/api/admin/channels/models", {
+                    method: "POST",
+                    headers: { cookie, origin: "http://localhost", "content-type": "application/json" },
+                    body: JSON.stringify({
+                        channelId: "default",
+                        baseUrl: config.channels[0].baseUrl,
+                        apiFormat: "openai",
+                        apiKey: "",
+                        useStoredApiKey: true,
+                    }),
+                }),
+            );
+            expect(response.status).toBe(200);
+            expect(await response.json()).toEqual({ models: ["model-a", "model-z"] });
+            expect(receivedAuthorization).toBe("Bearer sk-stored-model-key");
+        } finally {
+            upstream.stop(true);
+        }
+    });
+
+    test("fetches Gemini models and strips the models prefix", async () => {
+        let receivedApiKey = "";
+        const upstream = Bun.serve({
+            port: 0,
+            fetch(request) {
+                receivedApiKey = request.headers.get("x-goog-api-key") || "";
+                expect(new URL(request.url).pathname).toBe("/v1beta/models");
+                return Response.json({ models: [{ name: "models/gemini-2.5-pro" }, { name: "models/imagen-4" }] });
+            },
+        });
+        try {
+            const { cookie } = await login();
+            const response = await app.fetch(
+                new Request("http://localhost/api/admin/channels/models", {
+                    method: "POST",
+                    headers: { cookie, origin: "http://localhost", "content-type": "application/json" },
+                    body: JSON.stringify({
+                        channelId: "unsaved",
+                        baseUrl: `http://127.0.0.1:${upstream.port}`,
+                        apiFormat: "gemini",
+                        apiKey: "gemini-form-key",
+                        useStoredApiKey: false,
+                    }),
+                }),
+            );
+            expect(response.status).toBe(200);
+            expect(await response.json()).toEqual({ models: ["gemini-2.5-pro", "imagen-4"] });
+            expect(receivedApiKey).toBe("gemini-form-key");
+        } finally {
+            upstream.stop(true);
+        }
+    });
+
+    test("does not send a stored credential after the channel address changes", async () => {
+        const config = app.db.getConfig();
+        config.channels[0].apiKey = "sk-must-not-leak";
+        app.db.setConfig(config, null);
+        const { cookie } = await login();
+        const response = await app.fetch(
+            new Request("http://localhost/api/admin/channels/models", {
+                method: "POST",
+                headers: { cookie, origin: "http://localhost", "content-type": "application/json" },
+                body: JSON.stringify({
+                    channelId: "default",
+                    baseUrl: "https://changed.example.com",
+                    apiFormat: "openai",
+                    apiKey: "",
+                    useStoredApiKey: true,
+                }),
+            }),
+        );
+        expect(response.status).toBe(400);
+        expect((await response.json()).error).toContain("渠道地址或协议已修改");
+    });
 });
 
 describe("user authentication", () => {

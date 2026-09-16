@@ -11,8 +11,10 @@ import ImagePage from "@/pages/image";
 import NotFound from "@/pages/not-found";
 import PromptsPage from "@/pages/prompts";
 import VideoPage from "@/pages/video";
+import AdminPage from "@/pages/admin";
 
 export const router = createBrowserRouter([
+    { path: "/admin", element: <AdminPage /> },
     {
         element: (
             <UserLayout>

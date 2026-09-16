@@ -6,6 +6,7 @@ node_modules/
 data/
 *.log
 *.tsbuildinfo
+server/.typecheck/
 .DS_Store
 .idea
 web/dist

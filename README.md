@@ -99,17 +99,18 @@
 
 ## 快速开始
 
-AI API Key、Base URL、画布、素材和生成记录默认保存在浏览器本地。
+AI API Key 与全局模型配置由后端加密保存；画布、素材和生成记录仍默认保存在浏览器本地。
 
 ### 本地开发
 
 ```bash
 git clone git@github.com:yunshu-huabu/infinite-canvas.git
 cd infinite-canvas
-cd web
-bun install
+cd web && bun install && cd ..
 bun run dev
 ```
+
+前端打开 `http://localhost:3000`，管理员控制台位于 `http://localhost:3000/admin`。首次运行时，后端会在终端打印初始管理员密码；生产环境建议通过 `.env` 设置 `ADMIN_PASSWORD` 与 `CONFIG_ENCRYPTION_KEY`。
 
 ### Docker 运行
 

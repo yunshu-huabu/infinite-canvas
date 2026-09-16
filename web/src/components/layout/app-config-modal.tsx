@@ -1,7 +1,8 @@
 import { App, Button, Form, Input, Modal, Progress, Select, Tabs } from "antd";
 import type { TFunction } from "i18next";
-import { Cloud, Download, Pencil, Plus, RefreshCw, Trash2, Upload, Wifi } from "lucide-react";
+import { Cloud, Download, Pencil, Plus, RefreshCw, ServerCog, Trash2, Upload, Wifi } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -14,7 +15,18 @@ import { exportAppConfig, importAppConfig } from "@/services/config-file";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
-import { createModelChannel, modelOptionsFromChannels, normalizeModelOptionValue, selectableModelsByCapability, useConfigStore, type AiConfig, type ApiCallFormat, type ConfigTabKey, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import {
+    createModelChannel,
+    modelOptionsFromChannels,
+    normalizeModelOptionValue,
+    selectableModelsByCapability,
+    useConfigStore,
+    type AiConfig,
+    type ApiCallFormat,
+    type ConfigTabKey,
+    type ModelCapability,
+    type ModelChannel,
+} from "@/stores/use-config-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -58,6 +70,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const [webdavSyncStatus, setWebdavSyncStatus] = useState("");
     const [webdavDomainProgress, setWebdavDomainProgress] = useState(createWebdavDomainProgress);
     const config = useConfigStore((state) => state.config);
+    const backendManaged = useConfigStore((state) => state.backendManaged);
     const webdav = useConfigStore((state) => state.webdav);
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const updateWebdavConfig = useConfigStore((state) => state.updateWebdavConfig);
@@ -164,18 +177,20 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
 
     return (
         <>
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-200 pb-3 dark:border-stone-800">
-                <div className="text-xs text-stone-500">{t("config.fileSecurity")}</div>
-                <div className="flex gap-2">
-                    <Button icon={<Upload className="size-4" />} onClick={() => configInputRef.current?.click()}>
-                        {t("config.import")}
-                    </Button>
-                    <Button icon={<Download className="size-4" />} onClick={exportAppConfig}>
-                        {t("config.export")}
-                    </Button>
-                    <input ref={configInputRef} type="file" accept="application/json,.json" className="hidden" onChange={(event) => event.target.files?.[0] && void loadConfigFile(event.target.files[0])} />
+            {!backendManaged ? (
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-200 pb-3 dark:border-stone-800">
+                    <div className="text-xs text-stone-500">{t("config.fileSecurity")}</div>
+                    <div className="flex gap-2">
+                        <Button icon={<Upload className="size-4" />} onClick={() => configInputRef.current?.click()}>
+                            {t("config.import")}
+                        </Button>
+                        <Button icon={<Download className="size-4" />} onClick={exportAppConfig}>
+                            {t("config.export")}
+                        </Button>
+                        <input ref={configInputRef} type="file" accept="application/json,.json" className="hidden" onChange={(event) => event.target.files?.[0] && void loadConfigFile(event.target.files[0])} />
+                    </div>
                 </div>
-            </div>
+            ) : null}
             <Tabs
                 activeKey={activeTab}
                 onChange={(key) => setActiveTab(key as ConfigTabKey)}
@@ -183,7 +198,9 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                     {
                         key: "channels",
                         label: t("config.tabs.channels"),
-                        children: (
+                        children: backendManaged ? (
+                            <ServerManagedNotice />
+                        ) : (
                             <div>
                                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                                     <div className="text-xs text-stone-500">{t("config.channels.description")}</div>
@@ -215,12 +232,14 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                     {
                         key: "local-proxy",
                         label: t("config.tabs.localProxy"),
-                        children: <ConfigLocalProxy />,
+                        children: backendManaged ? <ServerManagedNotice /> : <ConfigLocalProxy />,
                     },
                     {
                         key: "preferences",
                         label: t("config.tabs.preferences"),
-                        children: (
+                        children: backendManaged ? (
+                            <ServerManagedNotice />
+                        ) : (
                             <Form layout="vertical" requiredMark={false}>
                                 <div className="mb-2 text-sm font-semibold">{t("config.preferences.defaultModels")}</div>
                                 <div className="mb-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -332,8 +351,23 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                     </Button>
                 </div>
             ) : null}
-            <ChannelEditorDrawer open={Boolean(editingChannel)} channel={editingChannel} onSave={saveChannel} onClose={() => setEditingChannelId("")} />
+            {!backendManaged ? <ChannelEditorDrawer open={Boolean(editingChannel)} channel={editingChannel} onSave={saveChannel} onClose={() => setEditingChannelId("")} /> : null}
         </>
+    );
+}
+
+function ServerManagedNotice() {
+    return (
+        <div className="flex min-h-52 flex-col items-center justify-center border-y border-stone-200 px-6 py-10 text-center dark:border-stone-800">
+            <span className="mb-4 flex size-10 items-center justify-center rounded-md bg-emerald-600 text-white">
+                <ServerCog className="size-5" />
+            </span>
+            <div className="text-sm font-semibold">此项由后端统一管理</div>
+            <p className="mt-2 max-w-md text-xs leading-5 text-stone-500">AI 渠道、密钥和全局默认参数已迁移到服务端，浏览器不会再保存真实 API Key。</p>
+            <Link to="/admin" className="mt-4">
+                <Button type="primary">打开管理控制台</Button>
+            </Link>
+        </div>
     );
 }
 

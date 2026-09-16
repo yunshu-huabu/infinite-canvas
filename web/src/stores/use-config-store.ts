@@ -134,10 +134,14 @@ export const defaultWebdavSyncConfig: WebdavSyncConfig = {
 type ConfigStore = {
     config: AiConfig;
     webdav: WebdavSyncConfig;
+    backendManaged: boolean;
+    backendConfigReady: boolean;
     isConfigOpen: boolean;
     configTab: ConfigTabKey;
     shouldPromptContinue: boolean;
     updateConfig: <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
+    applyBackendConfig: (config: AiConfig) => void;
+    setBackendConfigReady: (ready: boolean) => void;
     importChannelCredentials: (input: { baseUrl?: string | null; apiKey?: string | null }) => ChannelCredentialsImportResult;
     updateWebdavConfig: <K extends keyof WebdavSyncConfig>(key: K, value: WebdavSyncConfig[K]) => void;
     isAiConfigReady: (config: AiConfig, model: string) => boolean;
@@ -208,6 +212,8 @@ export const useConfigStore = create<ConfigStore>()(
         (set, get) => ({
             config: defaultConfig,
             webdav: defaultWebdavSyncConfig,
+            backendManaged: false,
+            backendConfigReady: false,
             isConfigOpen: false,
             configTab: "channels",
             shouldPromptContinue: false,
@@ -218,6 +224,8 @@ export const useConfigStore = create<ConfigStore>()(
                         [key]: value,
                     },
                 })),
+            applyBackendConfig: (config) => set({ config: normalizeAiConfig(config), backendManaged: true, backendConfigReady: true }),
+            setBackendConfigReady: (backendConfigReady) => set({ backendConfigReady }),
             importChannelCredentials: (input) => {
                 const currentConfig = get().config;
                 const result = upsertChannelCredentials(currentConfig, input);
@@ -282,7 +290,22 @@ export const useConfigStore = create<ConfigStore>()(
 
 export function useEffectiveConfig() {
     const config = useConfigStore((state) => state.config);
-    return useMemo(() => ({ ...config, channelMode: "local" as const }), [config]);
+    return useMemo(() => config, [config]);
+}
+
+function normalizeAiConfig(input: Partial<AiConfig>): AiConfig {
+    const config = { ...defaultConfig, ...input };
+    const channels = normalizeChannels(config);
+    return {
+        ...config,
+        apiFormat: normalizeApiFormat(config.apiFormat),
+        channels,
+        models: modelOptionsFromChannels(channels),
+        imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
+        videoModel: normalizeModelOptionValue(config.videoModel, channels),
+        textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
+        audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
+    };
 }
 
 /** Normalize a mixed list of raw model names or model objects into deduped ChannelModel entries. */
@@ -312,10 +335,7 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
     };
 }
 
-export function upsertChannelCredentials(
-    config: AiConfig,
-    input: { baseUrl?: string | null; apiKey?: string | null },
-): ChannelCredentialsImportResult & { config: AiConfig } {
+export function upsertChannelCredentials(config: AiConfig, input: { baseUrl?: string | null; apiKey?: string | null }): ChannelCredentialsImportResult & { config: AiConfig } {
     const rawBaseUrl = input.baseUrl?.trim() || "";
     if (!rawBaseUrl) return { status: "missing-base-url", config };
     if (!isHttpBaseUrl(rawBaseUrl)) return { status: "invalid-base-url", config };
@@ -421,7 +441,18 @@ export function resolveModelChannel(config: AiConfig, value: string) {
     const decoded = decodeChannelModel(value);
     const model = decoded?.model || value;
     const matched = decoded ? config.channels.find((channel) => channel.id === decoded.channelId) : config.channels.find((channel) => channel.models.some((item) => item.name === model));
-    return matched || config.channels[0] || createModelChannel({ id: "default", name: i18n.t("config.channels.defaultName"), baseUrl: config.baseUrl, apiKey: config.apiKey, apiFormat: config.apiFormat, models: config.models.map(modelOptionName).map((name) => ({ name, capability: guessCapability(name) })) });
+    return (
+        matched ||
+        config.channels[0] ||
+        createModelChannel({
+            id: "default",
+            name: i18n.t("config.channels.defaultName"),
+            baseUrl: config.baseUrl,
+            apiKey: config.apiKey,
+            apiFormat: config.apiFormat,
+            models: config.models.map(modelOptionName).map((name) => ({ name, capability: guessCapability(name) })),
+        })
+    );
 }
 
 export function resolveModelRequestConfig(config: AiConfig, value: string) {

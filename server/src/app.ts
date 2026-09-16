@@ -1,0 +1,276 @@
+import { existsSync, statSync } from "node:fs";
+import { extname, join, normalize, resolve, sep } from "node:path";
+
+import { adminConfig, normalizeManagedConfig, publicConfig } from "./config";
+import { AppDatabase, type AdminUser } from "./database";
+import { hashToken, loadEncryptionKey, randomToken } from "./security";
+
+const SESSION_COOKIE = "canvas_admin_session";
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+
+export type AppOptions = {
+    dataDir?: string;
+    databasePath?: string;
+    staticDir?: string;
+    encryptionSecret?: string;
+    adminUsername?: string;
+    adminPassword?: string;
+    production?: boolean;
+};
+
+export async function createApp(options: AppOptions = {}) {
+    const dataDir = resolve(options.dataDir || process.env.DATA_DIR || "data");
+    const databasePath = options.databasePath || join(dataDir, "infinite-canvas.sqlite");
+    const encryptionKey = loadEncryptionKey(join(dataDir, "master.key"), options.encryptionSecret || process.env.CONFIG_ENCRYPTION_KEY);
+    const db = new AppDatabase(databasePath, encryptionKey);
+    const adminUsername = options.adminUsername || process.env.ADMIN_USERNAME || "admin";
+    let initialPassword = "";
+
+    if (db.adminCount() === 0) {
+        initialPassword = options.adminPassword || process.env.ADMIN_PASSWORD || randomToken(15);
+        db.createAdmin(adminUsername, await Bun.password.hash(initialPassword, { algorithm: "argon2id" }));
+        db.audit(null, "admin.bootstrap", "admin", { username: adminUsername }, "local");
+    }
+
+    const staticDir = resolve(options.staticDir || process.env.STATIC_DIR || "web/dist");
+    const production = options.production ?? process.env.NODE_ENV === "production";
+
+    const fetch = async (request: Request) => {
+        const url = new URL(request.url);
+        try {
+            if (url.pathname === "/api/health" && request.method === "GET") return json({ ok: true, version: "0.1.0" });
+            if (url.pathname === "/api/config" && request.method === "GET") return json({ config: publicConfig(db.getConfig()) }, 200, { "cache-control": "no-store" });
+            if (url.pathname.startsWith("/api/admin/")) return handleAdmin(request, url, db, production);
+            if (url.pathname.startsWith("/api/ai/channels/")) return handleAiProxy(request, url, db);
+            if (url.pathname.startsWith("/api/")) return json({ error: "接口不存在" }, 404);
+            if (url.pathname === "/config.js") return runtimeConfig();
+            return serveStatic(url.pathname, staticDir);
+        } catch (error) {
+            console.error(error);
+            return json({ error: error instanceof Error ? error.message : "服务器内部错误" }, 500);
+        }
+    };
+
+    return { fetch, db, initialPassword, adminUsername };
+}
+
+async function handleAdmin(request: Request, url: URL, db: AppDatabase, production: boolean) {
+    const ip = clientIp(request);
+    if (request.method !== "GET" && !validOrigin(request, url)) return json({ error: "请求来源校验失败" }, 403);
+
+    if (url.pathname === "/api/admin/login" && request.method === "POST") {
+        const rate = loginAttempts.get(ip);
+        if (rate && rate.resetAt > Date.now() && rate.count >= 8) return json({ error: "登录尝试过多，请稍后再试" }, 429);
+        const body = await readJson<{ username?: string; password?: string }>(request);
+        const admin = body.username ? db.findAdmin(body.username.trim()) : null;
+        const valid = Boolean(admin && body.password && (await Bun.password.verify(body.password, admin.password_hash)));
+        if (!valid || !admin) {
+            recordFailedLogin(ip);
+            db.audit(admin?.id || null, "admin.login_failed", "session", { username: body.username || "" }, ip);
+            return json({ error: "用户名或密码错误" }, 401);
+        }
+        loginAttempts.delete(ip);
+        const token = randomToken();
+        const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
+        db.createSession(hashToken(token), admin.id, expiresAt.toISOString());
+        db.touchLogin(admin.id);
+        db.audit(admin.id, "admin.login", "session", {}, ip);
+        return json({ user: safeAdmin(admin) }, 200, { "set-cookie": sessionCookie(token, expiresAt, production) });
+    }
+
+    const auth = authenticate(request, db);
+    if (!auth) return json({ error: "需要管理员登录" }, 401);
+
+    if (url.pathname === "/api/admin/session" && request.method === "GET") return json({ user: safeAdmin(auth.admin) });
+    if (url.pathname === "/api/admin/logout" && request.method === "POST") {
+        db.deleteSession(auth.tokenHash);
+        db.audit(auth.admin.id, "admin.logout", "session", {}, ip);
+        return json({ ok: true }, 200, { "set-cookie": clearSessionCookie(production) });
+    }
+    if (url.pathname === "/api/admin/dashboard" && request.method === "GET") {
+        const config = db.getConfig();
+        return json({ ...db.dashboard(), channelCount: config.channels.length, modelCount: config.channels.reduce((sum, channel) => sum + channel.models.length, 0) });
+    }
+    if (url.pathname === "/api/admin/config" && request.method === "GET") return json({ config: adminConfig(db.getConfig()) }, 200, { "cache-control": "no-store" });
+    if (url.pathname === "/api/admin/config" && request.method === "PUT") {
+        const body = await readJson<{ config?: unknown }>(request);
+        const previous = db.getConfig();
+        const config = normalizeManagedConfig(body.config, previous);
+        assertUniqueChannels(config.channels.map((channel) => channel.id));
+        db.setConfig(config, auth.admin.id);
+        db.audit(auth.admin.id, "config.update", "ai_config", summarizeConfig(previous, config), ip);
+        return json({ config: adminConfig(config) });
+    }
+    if (url.pathname === "/api/admin/password" && request.method === "PUT") {
+        const body = await readJson<{ currentPassword?: string; newPassword?: string }>(request);
+        if (!body.currentPassword || !(await Bun.password.verify(body.currentPassword, auth.admin.password_hash))) return json({ error: "当前密码不正确" }, 400);
+        if (!body.newPassword || body.newPassword.length < 12) return json({ error: "新密码至少需要 12 个字符" }, 400);
+        db.updatePassword(auth.admin.id, await Bun.password.hash(body.newPassword, { algorithm: "argon2id" }));
+        db.audit(auth.admin.id, "admin.password_change", "admin", {}, ip);
+        return json({ ok: true }, 200, { "set-cookie": clearSessionCookie(production) });
+    }
+    if (url.pathname === "/api/admin/audit-logs" && request.method === "GET") return json({ logs: db.audits(Number(url.searchParams.get("limit")) || 100) });
+    return json({ error: "管理接口不存在" }, 404);
+}
+
+async function handleAiProxy(request: Request, url: URL, db: AppDatabase) {
+    const match = url.pathname.match(/^\/api\/ai\/channels\/([^/]+)(\/.*)?$/);
+    const channelId = decodeURIComponent(match?.[1] || "");
+    const path = match?.[2] || "/";
+    const channel = db.getConfig().channels.find((item) => item.id === channelId);
+    if (!channel) return json({ error: "AI 渠道不存在" }, 404);
+    if (!channel.apiKey) return json({ error: `渠道“${channel.name}”尚未配置 API Key` }, 503);
+
+    const target = joinUpstreamUrl(channel.baseUrl, path, url.search);
+    const headers = new Headers(request.headers);
+    for (const name of ["host", "content-length", "cookie", "origin", "referer", "x-forwarded-for", "x-real-ip"]) headers.delete(name);
+    if (channel.apiFormat === "gemini") {
+        headers.delete("authorization");
+        headers.set("x-goog-api-key", channel.apiKey);
+    } else {
+        headers.delete("x-goog-api-key");
+        headers.set("authorization", `Bearer ${channel.apiKey}`);
+    }
+
+    const startedAt = Date.now();
+    let status = 502;
+    try {
+        const upstream = await fetch(target, {
+            method: request.method,
+            headers,
+            body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
+            redirect: "follow",
+            signal: request.signal,
+        });
+        status = upstream.status;
+        const responseHeaders = new Headers(upstream.headers);
+        for (const name of ["content-encoding", "content-length", "transfer-encoding", "set-cookie", "access-control-allow-origin"]) responseHeaders.delete(name);
+        responseHeaders.set("x-canvas-channel", channel.id);
+        return new Response(upstream.body, { status, statusText: upstream.statusText, headers: responseHeaders });
+    } catch (error) {
+        return json({ error: error instanceof Error ? error.message : "AI 上游请求失败" }, 502);
+    } finally {
+        db.recordRequest(channel.id, request.method, path, status, Date.now() - startedAt);
+    }
+}
+
+function authenticate(request: Request, db: AppDatabase) {
+    const token = parseCookies(request.headers.get("cookie") || "")[SESSION_COOKIE];
+    if (!token) return null;
+    const tokenHash = hashToken(token);
+    const admin = db.sessionAdmin(tokenHash);
+    return admin ? { admin, tokenHash } : null;
+}
+
+function safeAdmin(admin: AdminUser) {
+    return { id: admin.id, username: admin.username, createdAt: admin.created_at, lastLoginAt: admin.last_login_at };
+}
+
+function sessionCookie(token: string, expiresAt: Date, secure: boolean) {
+    return `${SESSION_COOKIE}=${token}; Path=/api/admin; HttpOnly; SameSite=Strict; Expires=${expiresAt.toUTCString()}${secure ? "; Secure" : ""}`;
+}
+
+function clearSessionCookie(secure: boolean) {
+    return `${SESSION_COOKIE}=; Path=/api/admin; HttpOnly; SameSite=Strict; Max-Age=0${secure ? "; Secure" : ""}`;
+}
+
+function parseCookies(value: string) {
+    return Object.fromEntries(
+        value
+            .split(";")
+            .map((part) => part.trim().split("="))
+            .filter(([key]) => key)
+            .map(([key, ...rest]) => [key, decodeURIComponent(rest.join("="))]),
+    );
+}
+
+async function readJson<T>(request: Request): Promise<T> {
+    const length = Number(request.headers.get("content-length") || 0);
+    if (length > 2_000_000) throw new Error("请求内容过大");
+    return (await request.json()) as T;
+}
+
+function validOrigin(request: Request, url: URL) {
+    const origin = request.headers.get("origin");
+    if (!origin) return true;
+    const fetchSite = request.headers.get("sec-fetch-site");
+    if (fetchSite === "same-origin" || fetchSite === "none") return true;
+    if (fetchSite === "cross-site") return false;
+    try {
+        const originUrl = new URL(origin);
+        const expectedHost = request.headers.get("x-forwarded-host") || request.headers.get("host") || url.host;
+        return originUrl.host === expectedHost;
+    } catch {
+        return false;
+    }
+}
+
+function clientIp(request: Request) {
+    return (request.headers.get("x-forwarded-for") || request.headers.get("x-real-ip") || "local").split(",")[0].trim();
+}
+
+function recordFailedLogin(ip: string) {
+    const current = loginAttempts.get(ip);
+    loginAttempts.set(ip, current && current.resetAt > Date.now() ? { ...current, count: current.count + 1 } : { count: 1, resetAt: Date.now() + 15 * 60 * 1000 });
+}
+
+function assertUniqueChannels(ids: string[]) {
+    if (new Set(ids).size !== ids.length) throw new Error("渠道 ID 不能重复");
+}
+
+function summarizeConfig(previous: ReturnType<AppDatabase["getConfig"]>, next: ReturnType<AppDatabase["getConfig"]>) {
+    return {
+        channelsBefore: previous.channels.length,
+        channelsAfter: next.channels.length,
+        modelsBefore: previous.channels.reduce((sum, channel) => sum + channel.models.length, 0),
+        modelsAfter: next.channels.reduce((sum, channel) => sum + channel.models.length, 0),
+    };
+}
+
+function joinUpstreamUrl(baseUrl: string, path: string, search: string) {
+    const base = baseUrl.replace(/\/+$/, "");
+    const normalizedPath = base.toLowerCase().endsWith("/v1") && path.toLowerCase().startsWith("/v1/") ? path.slice(3) : path;
+    return `${base}${normalizedPath.startsWith("/") ? normalizedPath : `/${normalizedPath}`}${search}`;
+}
+
+function runtimeConfig() {
+    const clean = (value: string | undefined) => (value || "").replace(/[^A-Za-z0-9-]/g, "");
+    const script = `window.__RUNTIME_CONFIG__ = ${JSON.stringify({ ANALYTICS_GA4_ID: clean(process.env.ANALYTICS_GA4_ID), ANALYTICS_BAIDU_ID: clean(process.env.ANALYTICS_BAIDU_ID) })};`;
+    return new Response(script, { headers: { "content-type": "application/javascript; charset=utf-8", "cache-control": "no-store" } });
+}
+
+function serveStatic(pathname: string, staticDir: string) {
+    if (!existsSync(staticDir)) return json({ error: "前端尚未构建，请先运行 bun run build" }, 503);
+    const decoded = decodeURIComponent(pathname);
+    const relative = normalize(decoded).replace(/^([/\\])+/, "");
+    const candidate = resolve(staticDir, relative || "index.html");
+    const insideStaticDir = candidate === staticDir || candidate.startsWith(`${staticDir}${sep}`);
+    const filePath = insideStaticDir && existsSync(candidate) && statSync(candidate).isFile() ? candidate : join(staticDir, "index.html");
+    const headers: Record<string, string> = { "content-type": mimeType(filePath) };
+    if (filePath.endsWith("index.html")) headers["cache-control"] = "no-cache";
+    else if (/\.[a-f0-9]{8,}\./i.test(filePath)) headers["cache-control"] = "public, max-age=31536000, immutable";
+    return new Response(Bun.file(filePath), { headers });
+}
+
+function mimeType(path: string) {
+    return (
+        {
+            ".html": "text/html; charset=utf-8",
+            ".js": "application/javascript; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+            ".json": "application/json; charset=utf-8",
+            ".svg": "image/svg+xml",
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".woff2": "font/woff2",
+            ".mp4": "video/mp4",
+        }[extname(path).toLowerCase()] || "application/octet-stream"
+    );
+}
+
+function json(value: unknown, status = 200, headers: Record<string, string> = {}) {
+    return Response.json(value, { status, headers: { "cache-control": "no-store", ...headers } });
+}

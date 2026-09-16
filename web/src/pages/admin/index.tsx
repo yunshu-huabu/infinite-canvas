@@ -1,10 +1,12 @@
 import { App, Button, Form, Input, Modal, Popconfirm, Select, Spin, Switch, Table, Tag, Tooltip } from "antd";
-import { Activity, ArrowLeft, AudioLines, BookOpenCheck, Boxes, Gauge, Image, KeyRound, LogOut, Pencil, Plus, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, Trash2, UserPlus, Users, Video } from "lucide-react";
+import { Activity, ArrowLeft, AudioLines, BookOpenCheck, Boxes, Gauge, Image, KeyRound, LogOut, Pencil, Plus, RefreshCw, Save, Settings2, ShieldCheck, Trash2, UserCheck, UserRound, Users, UserX, Video } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { adminApi, type AdminConfig, type AdminUser, type AuditLog, type DashboardData, type ManagedUser } from "@/services/admin-api";
 import { createModelChannel, encodeChannelModel, type ModelCapability } from "@/stores/use-config-store";
+
+import { getManagedUserPresentation, getNextDisabledState } from "./user-management";
 
 type Section = "overview" | "users" | "channels" | "defaults" | "audit" | "security";
 
@@ -87,15 +89,15 @@ export default function AdminPage() {
     };
 
     return (
-        <div className="flex h-dvh overflow-hidden bg-stone-100 text-stone-950 dark:bg-stone-950 dark:text-stone-100">
-            <aside className="flex w-16 shrink-0 flex-col border-r border-stone-200 bg-white sm:w-60 dark:border-stone-800 dark:bg-stone-900">
-                <div className="flex h-16 items-center justify-center gap-3 border-b border-stone-200 px-3 sm:justify-start sm:px-5 dark:border-stone-800">
-                    <span className="flex size-8 items-center justify-center rounded-md bg-emerald-600 text-white">
+        <div className="admin-console flex h-dvh overflow-hidden bg-stone-100 text-stone-950 dark:bg-[#0c0c0b] dark:text-stone-100">
+            <aside className="flex w-16 shrink-0 flex-col border-r border-[#34312d] bg-[#191816] text-stone-100 sm:w-60">
+                <div className="flex h-16 items-center justify-center gap-3 border-b border-[#34312d] px-3 sm:justify-start sm:px-5">
+                    <span className="flex size-8 items-center justify-center rounded-md bg-emerald-500 text-stone-950 shadow-sm shadow-emerald-950/40">
                         <ShieldCheck className="size-4" />
                     </span>
                     <div className="hidden min-w-0 sm:block">
-                        <div className="truncate text-sm font-semibold">无限画布管理台</div>
-                        <div className="text-[11px] text-stone-500">SERVER CONTROL</div>
+                        <div className="truncate text-sm font-semibold text-white">无限画布管理台</div>
+                        <div className="text-[11px] text-stone-400">SERVER CONTROL</div>
                     </div>
                 </div>
                 <nav className="flex-1 space-y-1 p-3">
@@ -106,10 +108,12 @@ export default function AdminPage() {
                     <AdminNav active={section} value="audit" icon={BookOpenCheck} label="审计日志" onClick={setSection} />
                     <AdminNav active={section} value="security" icon={KeyRound} label="账号安全" onClick={setSection} />
                 </nav>
-                <div className="border-t border-stone-200 p-3 dark:border-stone-800">
-                    <div className="mb-2 hidden px-2 text-xs text-stone-500 sm:block">已登录：{user.username}</div>
+                <div className="border-t border-[#34312d] p-3">
+                    <div className="mb-2 hidden px-2 text-xs text-stone-400 sm:block">
+                        已登录：<span className="text-stone-200">{user.username}</span>
+                    </div>
                     <Tooltip title="退出登录">
-                        <Button block type="text" icon={<LogOut className="size-4" />} onClick={() => void logout()}>
+                        <Button block type="text" className="!text-stone-200 hover:!bg-white/10 hover:!text-white" icon={<LogOut className="size-4" />} onClick={() => void logout()}>
                             <span className="hidden sm:inline">退出登录</span>
                         </Button>
                     </Tooltip>
@@ -374,6 +378,7 @@ function UsersManager({ users, onRefresh }: { users: ManagedUser[]; onRefresh: (
     const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
     const [resetUser, setResetUser] = useState<ManagedUser | null>(null);
     const [submitting, setSubmitting] = useState(false);
+    const [refreshing, setRefreshing] = useState(false);
     const [createForm] = Form.useForm();
     const [editForm] = Form.useForm();
     const [resetForm] = Form.useForm();
@@ -418,59 +423,120 @@ function UsersManager({ users, onRefresh }: { users: ManagedUser[]; onRefresh: (
         editForm.setFieldsValue({ displayName: user.displayName, disabled: user.disabled });
     };
 
+    const refresh = async () => {
+        setRefreshing(true);
+        try {
+            await onRefresh();
+            message.success("用户列表已刷新");
+        } catch (error) {
+            message.error(readError(error));
+        } finally {
+            setRefreshing(false);
+        }
+    };
+
+    const toggleUserState = (user: ManagedUser) => run(() => adminApi.updateUser(user.id, { displayName: user.displayName, disabled: getNextDisabledState(user) }), user.disabled ? "账号已启用" : "账号已停用");
+
     return (
-        <div>
-            <div className="mb-6 flex items-end justify-between gap-4">
+        <div className="space-y-5">
+            <div className="flex items-end justify-between gap-4">
                 <div>
                     <h1 className="text-2xl font-semibold">用户管理</h1>
-                    <p className="mt-1 text-sm text-stone-500">创建创作端账号、停用访问权限或重置用户密码。</p>
+                    <p className="mt-1 text-sm text-stone-500 dark:text-stone-400">创建账号并管理用户权限和登录状态。</p>
                 </div>
-                <Button type="primary" icon={<UserPlus className="size-4" />} onClick={() => setCreateOpen(true)}>
-                    新建用户
-                </Button>
+                <div className="flex items-center gap-2">
+                    <Tooltip title="刷新用户列表">
+                        <Button aria-label="刷新用户列表" icon={<RefreshCw className={`size-4 ${refreshing ? "animate-spin" : ""}`} />} onClick={() => void refresh()} disabled={refreshing} />
+                    </Tooltip>
+                    <Button type="primary" icon={<Plus className="size-4" />} onClick={() => setCreateOpen(true)}>
+                        创建用户
+                    </Button>
+                </div>
             </div>
-            <Table
-                rowKey="id"
-                dataSource={users}
-                pagination={{ pageSize: 15 }}
-                columns={[
-                    {
-                        title: "用户",
-                        key: "identity",
-                        render: (_, user) => (
-                            <div>
-                                <div className="font-medium">{user.displayName}</div>
-                                <div className="text-xs text-stone-500">@{user.username}</div>
-                            </div>
-                        ),
-                    },
-                    { title: "状态", dataIndex: "disabled", width: 110, render: (disabled) => <Tag color={disabled ? "default" : "success"}>{disabled ? "已停用" : "正常"}</Tag> },
-                    { title: "上次登录", dataIndex: "lastLoginAt", width: 190, render: (value) => (value ? formatTime(value) : "从未登录") },
-                    { title: "创建时间", dataIndex: "createdAt", width: 190, render: formatTime },
-                    {
-                        title: "操作",
-                        key: "actions",
-                        width: 160,
-                        render: (_, user) => (
-                            <div className="flex gap-1">
-                                <Tooltip title="编辑">
-                                    <Button type="text" icon={<Pencil className="size-4" />} onClick={() => openEdit(user)} />
-                                </Tooltip>
-                                <Tooltip title="重置密码">
-                                    <Button type="text" icon={<RotateCcw className="size-4" />} onClick={() => setResetUser(user)} />
-                                </Tooltip>
-                                <Popconfirm title={`删除用户 ${user.username}？`} description="该用户的所有登录会话会立即失效。" onConfirm={() => void run(() => adminApi.deleteUser(user.id), "用户已删除")}>
-                                    <Tooltip title="删除">
-                                        <Button type="text" danger icon={<Trash2 className="size-4" />} />
-                                    </Tooltip>
-                                </Popconfirm>
-                            </div>
-                        ),
-                    },
-                ]}
-            />
+            <div className="overflow-hidden rounded-md border border-stone-200 bg-white dark:border-stone-800 dark:bg-[#141413]">
+                <Table
+                    className="admin-users-table"
+                    rowKey="id"
+                    dataSource={users}
+                    loading={refreshing}
+                    scroll={{ x: 920 }}
+                    locale={{ emptyText: "暂无用户，创建一个账号开始使用" }}
+                    pagination={{ pageSize: 15, hideOnSinglePage: true, showSizeChanger: false }}
+                    columns={[
+                        {
+                            title: "用户名",
+                            key: "identity",
+                            minWidth: 230,
+                            render: (_, user) => (
+                                <div className="flex min-w-0 items-center gap-3">
+                                    <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-stone-100 text-stone-600 dark:bg-stone-800 dark:text-stone-200">
+                                        <UserRound className="size-4" />
+                                    </span>
+                                    <div className="min-w-0">
+                                        <div className="truncate font-semibold text-stone-950 dark:text-white">{user.username}</div>
+                                        <div className="truncate text-xs text-stone-500 dark:text-stone-400">{user.displayName}</div>
+                                    </div>
+                                </div>
+                            ),
+                        },
+                        {
+                            title: "角色",
+                            key: "role",
+                            width: 130,
+                            render: (_, user) => {
+                                const presentation = getManagedUserPresentation(user);
+                                return <Tag icon={<ShieldCheck className="size-3" />}>{presentation.roleLabel}</Tag>;
+                            },
+                        },
+                        {
+                            title: "状态",
+                            key: "status",
+                            width: 110,
+                            render: (_, user) => {
+                                const presentation = getManagedUserPresentation(user);
+                                return <Tag color={presentation.statusColor}>{presentation.statusLabel}</Tag>;
+                            },
+                        },
+                        { title: "上次登录", dataIndex: "lastLoginAt", width: 190, render: (value) => <span className="text-stone-600 dark:text-stone-300">{value ? formatTime(value) : "从未登录"}</span> },
+                        { title: "创建时间", dataIndex: "createdAt", width: 190, render: (value) => <span className="text-stone-600 dark:text-stone-300">{formatTime(value)}</span> },
+                        {
+                            title: "操作",
+                            key: "actions",
+                            fixed: "right",
+                            width: 190,
+                            render: (_, user) => {
+                                const presentation = getManagedUserPresentation(user);
+                                return (
+                                    <div className="flex items-center gap-1.5">
+                                        <Tooltip title="编辑用户">
+                                            <Button aria-label={`编辑用户 ${user.username}`} size="small" icon={<Pencil className="size-3.5" />} onClick={() => openEdit(user)} />
+                                        </Tooltip>
+                                        <Popconfirm
+                                            title={`${presentation.toggleLabel} ${user.username}？`}
+                                            description={user.disabled ? "启用后，该用户可以重新登录。" : "停用后，该用户的已有会话会立即失效。"}
+                                            onConfirm={() => void toggleUserState(user)}
+                                        >
+                                            <Tooltip title={presentation.toggleLabel}>
+                                                <Button aria-label={`${presentation.toggleLabel} ${user.username}`} size="small" icon={user.disabled ? <UserCheck className="size-3.5" /> : <UserX className="size-3.5" />} />
+                                            </Tooltip>
+                                        </Popconfirm>
+                                        <Tooltip title="重置密码">
+                                            <Button aria-label={`重置 ${user.username} 的密码`} size="small" icon={<KeyRound className="size-3.5" />} onClick={() => setResetUser(user)} />
+                                        </Tooltip>
+                                        <Popconfirm title={`删除用户 ${user.username}？`} description="该用户的所有登录会话会立即失效，此操作不可撤销。" onConfirm={() => void run(() => adminApi.deleteUser(user.id), "用户已删除")}>
+                                            <Tooltip title="删除用户">
+                                                <Button aria-label={`删除用户 ${user.username}`} size="small" danger icon={<Trash2 className="size-3.5" />} />
+                                            </Tooltip>
+                                        </Popconfirm>
+                                    </div>
+                                );
+                            },
+                        },
+                    ]}
+                />
+            </div>
 
-            <Modal title="新建创作用户" open={createOpen} onCancel={() => setCreateOpen(false)} footer={null} destroyOnHidden>
+            <Modal rootClassName="admin-user-modal" title="新建创作用户" open={createOpen} onCancel={() => setCreateOpen(false)} footer={null} destroyOnHidden>
                 <Form form={createForm} layout="vertical" requiredMark={false} onFinish={(values) => void create(values)}>
                     <Form.Item name="username" label="用户名" extra="3-32 位字母、数字、点、下划线或短横线" rules={[{ required: true }, { pattern: /^[a-zA-Z0-9_.-]{3,32}$/, message: "用户名格式不正确" }]}>
                         <Input autoComplete="off" />
@@ -490,7 +556,7 @@ function UsersManager({ users, onRefresh }: { users: ManagedUser[]; onRefresh: (
                 </Form>
             </Modal>
 
-            <Modal title={`编辑用户 · ${editingUser?.username || ""}`} open={Boolean(editingUser)} onCancel={() => setEditingUser(null)} footer={null} destroyOnHidden>
+            <Modal rootClassName="admin-user-modal" title={`编辑用户 · ${editingUser?.username || ""}`} open={Boolean(editingUser)} onCancel={() => setEditingUser(null)} footer={null} destroyOnHidden>
                 <Form form={editForm} layout="vertical" requiredMark={false} onFinish={(values) => void edit(values)}>
                     <Form.Item name="displayName" label="显示名称" rules={[{ required: true }]}>
                         <Input />
@@ -507,7 +573,7 @@ function UsersManager({ users, onRefresh }: { users: ManagedUser[]; onRefresh: (
                 </Form>
             </Modal>
 
-            <Modal title={`重置密码 · ${resetUser?.username || ""}`} open={Boolean(resetUser)} onCancel={() => setResetUser(null)} footer={null} destroyOnHidden>
+            <Modal rootClassName="admin-user-modal" title={`重置密码 · ${resetUser?.username || ""}`} open={Boolean(resetUser)} onCancel={() => setResetUser(null)} footer={null} destroyOnHidden>
                 <Form form={resetForm} layout="vertical" requiredMark={false} onFinish={(values) => void resetPassword(values)}>
                     <Form.Item name="password" label="新密码" extra="至少 8 个字符；保存后该用户需要重新登录" rules={[{ required: true }, { min: 8 }]}>
                         <Input.Password autoComplete="new-password" />
@@ -612,7 +678,7 @@ function AdminNav({ active, value, icon: Icon, label, onClick }: { active: Secti
                 type="button"
                 aria-label={label}
                 onClick={() => onClick(value)}
-                className={`flex h-10 w-full items-center justify-center gap-3 rounded-md px-3 text-sm transition sm:justify-start ${active === value ? "bg-stone-950 text-white dark:bg-stone-100 dark:text-stone-950" : "text-stone-600 hover:bg-stone-100 dark:text-stone-300 dark:hover:bg-stone-800"}`}
+                className={`flex h-10 w-full items-center justify-center gap-3 rounded-md px-3 text-sm font-medium transition sm:justify-start ${active === value ? "bg-emerald-500 text-stone-950 shadow-sm shadow-black/30" : "text-stone-200 hover:bg-white/10 hover:text-white"}`}
             >
                 <Icon className="size-4 shrink-0" />
                 <span className="hidden sm:inline">{label}</span>

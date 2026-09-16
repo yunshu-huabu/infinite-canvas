@@ -141,6 +141,58 @@
 }
 
 @layer utilities {
+    .admin-console .admin-users-table .ant-table-thead > tr > th {
+        font-size: 13px;
+        font-weight: 700;
+    }
+
+    .admin-console .admin-users-table .ant-table-tbody > tr > td {
+        padding-block: 16px;
+    }
+
+    .dark .admin-console .admin-users-table .ant-table-container,
+    .dark .admin-console .admin-users-table .ant-table-cell-fix-right {
+        background: #141413;
+    }
+
+    .dark .admin-console .admin-users-table .ant-table-thead > tr > th {
+        background: #211f1d;
+        color: #f5f5f4;
+    }
+
+    .dark .admin-console .admin-users-table .ant-table-tbody > tr > td {
+        border-bottom-color: #34312d;
+    }
+
+    .dark .admin-console .admin-users-table .ant-table-tbody > tr:hover > td,
+    .dark .admin-console .admin-users-table .ant-table-tbody > tr:hover > td.ant-table-cell-fix-right {
+        background: #1d1b19 !important;
+    }
+
+    .admin-user-modal .ant-modal-content {
+        border: 1px solid rgba(120, 113, 108, 0.35);
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+    }
+
+    .admin-user-modal .ant-modal-title,
+    .admin-user-modal .ant-form-item-label > label {
+        font-weight: 700;
+    }
+
+    .dark .admin-user-modal .ant-modal-content {
+        background: #1b1917;
+        border-color: #44403c;
+    }
+
+    .dark .admin-user-modal .ant-modal-title,
+    .dark .admin-user-modal .ant-form-item-label > label {
+        color: #fafaf9;
+    }
+
+    .dark .admin-user-modal .ant-form-item-extra {
+        color: #a8a29e;
+    }
+
     .ai-title-aurora {
         background: linear-gradient(90deg, #111827 0%, #111827 36%, #6b7280 54%, #111827 72%, #111827 100%);
         background-size: 220% 100%;
@@ -452,7 +504,6 @@
             transform: translate(0, 0) rotate(0) scale(1);
         }
     }
-
 }
 
 ::view-transition-old(root),

@@ -143,7 +143,7 @@ export default function AdminPage() {
                 </header>
                 <div className="mx-auto max-w-7xl p-4 sm:p-7">
                     {section === "overview" && dashboard ? <Overview data={dashboard} onRefresh={() => void loadData()} /> : null}
-                    {section === "users" ? <UsersManager users={managedUsers} onRefresh={loadData} /> : null}
+                    {section === "users" ? <UsersManager users={managedUsers} currentUser={user} onRefresh={loadData} /> : null}
                     {section === "channels" && config ? <ChannelsEditor config={config} onChange={setConfig} /> : null}
                     {section === "defaults" && config ? <DefaultsEditor config={config} onChange={setConfig} /> : null}
                     {section === "audit" ? <AuditLogs logs={audits} /> : null}
@@ -193,7 +193,7 @@ function Overview({ data, onRefresh }: { data: DashboardData; onRefresh: () => v
         { label: "失败请求", value: data.failed24h, hint: data.requests24h ? `${Math.round((data.failed24h / data.requests24h) * 100)}% 失败率` : "暂无请求", icon: ShieldCheck },
         { label: "平均响应", value: `${data.averageMs24h} ms`, hint: "24 小时平均耗时", icon: Gauge },
         { label: "模型资源", value: `${data.channelCount} / ${data.modelCount}`, hint: "渠道 / 模型", icon: Boxes },
-        { label: "创作用户", value: data.userCount, hint: "已创建用户账号", icon: Users },
+        { label: "用户账号", value: data.userCount, hint: "已创建用户账号", icon: Users },
     ];
     return (
         <div className="space-y-7">
@@ -406,7 +406,7 @@ function DefaultsEditor({ config, onChange }: { config: AdminConfig; onChange: (
     );
 }
 
-function UsersManager({ users, onRefresh }: { users: ManagedUser[]; onRefresh: () => Promise<void> }) {
+function UsersManager({ users, currentUser, onRefresh }: { users: ManagedUser[]; currentUser: AdminUser; onRefresh: () => Promise<void> }) {
     const { message } = App.useApp();
     const [createOpen, setCreateOpen] = useState(false);
     const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
@@ -432,14 +432,14 @@ function UsersManager({ users, onRefresh }: { users: ManagedUser[]; onRefresh: (
         }
     };
 
-    const create = async (values: { username: string; displayName: string; password: string }) => {
+    const create = async (values: { username: string; displayName: string; password: string; role: "admin" | "user" }) => {
         if (await run(() => adminApi.createUser(values), "用户已创建")) {
             setCreateOpen(false);
             createForm.resetFields();
         }
     };
 
-    const edit = async (values: { displayName: string; disabled: boolean }) => {
+    const edit = async (values: { displayName: string; disabled: boolean; role: "admin" | "user" }) => {
         if (!editingUser) return;
         if (await run(() => adminApi.updateUser(editingUser.id, values), "用户信息已更新")) setEditingUser(null);
     };
@@ -454,7 +454,7 @@ function UsersManager({ users, onRefresh }: { users: ManagedUser[]; onRefresh: (
 
     const openEdit = (user: ManagedUser) => {
         setEditingUser(user);
-        editForm.setFieldsValue({ displayName: user.displayName, disabled: user.disabled });
+        editForm.setFieldsValue({ displayName: user.displayName, role: user.role, disabled: user.disabled });
     };
 
     const refresh = async () => {
@@ -469,7 +469,7 @@ function UsersManager({ users, onRefresh }: { users: ManagedUser[]; onRefresh: (
         }
     };
 
-    const toggleUserState = (user: ManagedUser) => run(() => adminApi.updateUser(user.id, { displayName: user.displayName, disabled: getNextDisabledState(user) }), user.disabled ? "账号已启用" : "账号已停用");
+    const toggleUserState = (user: ManagedUser) => run(() => adminApi.updateUser(user.id, { displayName: user.displayName, role: user.role, disabled: getNextDisabledState(user) }), user.disabled ? "账号已启用" : "账号已停用");
 
     return (
         <div className="space-y-5">
@@ -507,7 +507,10 @@ function UsersManager({ users, onRefresh }: { users: ManagedUser[]; onRefresh: (
                                         <UserRound className="size-4" />
                                     </span>
                                     <div className="min-w-0">
-                                        <div className="truncate font-semibold text-stone-950 dark:text-white">{user.username}</div>
+                                        <div className="flex min-w-0 items-center gap-2">
+                                            <span className="truncate font-semibold text-stone-950 dark:text-white">{user.username}</span>
+                                            {currentUser.managedUserId === user.id ? <Tag className="!m-0 shrink-0">当前账号</Tag> : null}
+                                        </div>
                                         <div className="truncate text-xs text-stone-500 dark:text-stone-400">{user.displayName}</div>
                                     </div>
                                 </div>
@@ -519,7 +522,11 @@ function UsersManager({ users, onRefresh }: { users: ManagedUser[]; onRefresh: (
                             width: 130,
                             render: (_, user) => {
                                 const presentation = getManagedUserPresentation(user);
-                                return <Tag icon={<ShieldCheck className="size-3" />}>{presentation.roleLabel}</Tag>;
+                                return (
+                                    <Tag color={presentation.roleColor} icon={user.role === "admin" ? <ShieldCheck className="size-3" /> : <UserRound className="size-3" />}>
+                                        {presentation.roleLabel}
+                                    </Tag>
+                                );
                             },
                         },
                         {
@@ -540,6 +547,7 @@ function UsersManager({ users, onRefresh }: { users: ManagedUser[]; onRefresh: (
                             width: 190,
                             render: (_, user) => {
                                 const presentation = getManagedUserPresentation(user);
+                                const isCurrentUser = currentUser.managedUserId === user.id;
                                 return (
                                     <div className="flex items-center gap-1.5">
                                         <Tooltip title="编辑用户">
@@ -548,18 +556,19 @@ function UsersManager({ users, onRefresh }: { users: ManagedUser[]; onRefresh: (
                                         <Popconfirm
                                             title={`${presentation.toggleLabel} ${user.username}？`}
                                             description={user.disabled ? "启用后，该用户可以重新登录。" : "停用后，该用户的已有会话会立即失效。"}
+                                            disabled={isCurrentUser}
                                             onConfirm={() => void toggleUserState(user)}
                                         >
-                                            <Tooltip title={presentation.toggleLabel}>
-                                                <Button aria-label={`${presentation.toggleLabel} ${user.username}`} size="small" icon={user.disabled ? <UserCheck className="size-3.5" /> : <UserX className="size-3.5" />} />
+                                            <Tooltip title={isCurrentUser ? "不能停用当前账号" : presentation.toggleLabel}>
+                                                <Button disabled={isCurrentUser} aria-label={`${presentation.toggleLabel} ${user.username}`} size="small" icon={user.disabled ? <UserCheck className="size-3.5" /> : <UserX className="size-3.5" />} />
                                             </Tooltip>
                                         </Popconfirm>
-                                        <Tooltip title="重置密码">
-                                            <Button aria-label={`重置 ${user.username} 的密码`} size="small" icon={<KeyRound className="size-3.5" />} onClick={() => setResetUser(user)} />
+                                        <Tooltip title={isCurrentUser ? "请在账号安全中修改密码" : "重置密码"}>
+                                            <Button disabled={isCurrentUser} aria-label={`重置 ${user.username} 的密码`} size="small" icon={<KeyRound className="size-3.5" />} onClick={() => setResetUser(user)} />
                                         </Tooltip>
-                                        <Popconfirm title={`删除用户 ${user.username}？`} description="该用户的所有登录会话会立即失效，此操作不可撤销。" onConfirm={() => void run(() => adminApi.deleteUser(user.id), "用户已删除")}>
-                                            <Tooltip title="删除用户">
-                                                <Button aria-label={`删除用户 ${user.username}`} size="small" danger icon={<Trash2 className="size-3.5" />} />
+                                        <Popconfirm disabled={isCurrentUser} title={`删除用户 ${user.username}？`} description="该用户的所有登录会话会立即失效，此操作不可撤销。" onConfirm={() => void run(() => adminApi.deleteUser(user.id), "用户已删除")}>
+                                            <Tooltip title={isCurrentUser ? "不能删除当前账号" : "删除用户"}>
+                                                <Button disabled={isCurrentUser} aria-label={`删除用户 ${user.username}`} size="small" danger icon={<Trash2 className="size-3.5" />} />
                                             </Tooltip>
                                         </Popconfirm>
                                     </div>
@@ -570,13 +579,21 @@ function UsersManager({ users, onRefresh }: { users: ManagedUser[]; onRefresh: (
                 />
             </div>
 
-            <Modal rootClassName="admin-user-modal" title="新建创作用户" open={createOpen} onCancel={() => setCreateOpen(false)} footer={null} destroyOnHidden>
-                <Form form={createForm} layout="vertical" requiredMark={false} onFinish={(values) => void create(values)}>
+            <Modal rootClassName="admin-user-modal" title="新建用户" open={createOpen} onCancel={() => setCreateOpen(false)} footer={null} destroyOnHidden>
+                <Form form={createForm} layout="vertical" initialValues={{ role: "user" }} requiredMark={false} onFinish={(values) => void create(values)}>
                     <Form.Item name="username" label="用户名" extra="3-32 位字母、数字、点、下划线或短横线" rules={[{ required: true }, { pattern: /^[a-zA-Z0-9_.-]{3,32}$/, message: "用户名格式不正确" }]}>
                         <Input autoComplete="off" />
                     </Form.Item>
                     <Form.Item name="displayName" label="显示名称" rules={[{ required: true }]}>
                         <Input />
+                    </Form.Item>
+                    <Form.Item name="role" label="角色" rules={[{ required: true }]}>
+                        <Select
+                            options={[
+                                { value: "user", label: "普通用户" },
+                                { value: "admin", label: "管理员" },
+                            ]}
+                        />
                     </Form.Item>
                     <Form.Item name="password" label="初始密码" extra="至少 8 个字符" rules={[{ required: true }, { min: 8 }]}>
                         <Input.Password autoComplete="new-password" />
@@ -595,8 +612,17 @@ function UsersManager({ users, onRefresh }: { users: ManagedUser[]; onRefresh: (
                     <Form.Item name="displayName" label="显示名称" rules={[{ required: true }]}>
                         <Input />
                     </Form.Item>
-                    <Form.Item name="disabled" label="停用账号" valuePropName="checked" extra="停用后，该用户的已有会话会立即失效。">
-                        <Switch />
+                    <Form.Item name="role" label="角色" extra={currentUser.managedUserId === editingUser?.id ? "当前账号必须保留管理员角色。" : undefined} rules={[{ required: true }]}>
+                        <Select
+                            disabled={currentUser.managedUserId === editingUser?.id}
+                            options={[
+                                { value: "user", label: "普通用户" },
+                                { value: "admin", label: "管理员" },
+                            ]}
+                        />
+                    </Form.Item>
+                    <Form.Item name="disabled" label="停用账号" valuePropName="checked" extra={currentUser.managedUserId === editingUser?.id ? "当前账号不能停用。" : "停用后，该用户的已有会话会立即失效。"}>
+                        <Switch disabled={currentUser.managedUserId === editingUser?.id} />
                     </Form.Item>
                     <div className="flex justify-end gap-2">
                         <Button onClick={() => setEditingUser(null)}>取消</Button>

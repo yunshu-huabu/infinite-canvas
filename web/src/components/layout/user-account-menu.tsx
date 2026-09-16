@@ -54,7 +54,7 @@ export function UserAccountMenu({ className, style }: { className: string; style
         password: () => setPasswordOpen(true),
         logout: () => void logout(),
     };
-    const actionItems: MenuProps["items"] = getUserAccountMenuActions(backendManaged).map(({ key, label, danger }) => ({
+    const actionItems: MenuProps["items"] = getUserAccountMenuActions(backendManaged, user.role).map(({ key, label, danger }) => ({
         key,
         icon: actionIcons[key],
         label,

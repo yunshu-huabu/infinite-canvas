@@ -7,6 +7,7 @@ const user: LocalUser = {
     id: 1,
     username: "yunshu",
     displayName: "yunshu",
+    role: "user",
     disabled: false,
     createdAt: "2026-09-16T00:00:00.000Z",
     updatedAt: "2026-09-16T00:00:00.000Z",

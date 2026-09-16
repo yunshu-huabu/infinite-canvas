@@ -2,7 +2,8 @@ import type { AiConfig, ModelChannel } from "@/stores/use-config-store";
 
 export type AdminChannel = ModelChannel & { hasApiKey?: boolean; clearApiKey?: boolean };
 export type AdminConfig = Omit<AiConfig, "channels"> & { channels: AdminChannel[] };
-export type AdminUser = { id: number; username: string; createdAt: string; lastLoginAt: string | null };
+export type UserRole = "admin" | "user";
+export type AdminUser = { id: number; username: string; displayName: string; role: "admin"; source: "system" | "user"; managedUserId: number | null; createdAt: string; lastLoginAt: string | null };
 export type DashboardData = {
     requests24h: number;
     failed24h: number;
@@ -14,7 +15,7 @@ export type DashboardData = {
     recentRequests: Array<{ channel_id: string; method: string; path: string; status: number; duration_ms: number; created_at: string }>;
 };
 export type AuditLog = { id: number; username?: string; action: string; target: string; detail: string; ip: string; created_at: string };
-export type ManagedUser = { id: number; username: string; displayName: string; disabled: boolean; createdAt: string; updatedAt: string; lastLoginAt: string | null };
+export type ManagedUser = { id: number; username: string; displayName: string; role: UserRole; disabled: boolean; createdAt: string; updatedAt: string; lastLoginAt: string | null };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(path, {
@@ -38,8 +39,8 @@ export const adminApi = {
         request<{ models: string[] }>("/api/admin/channels/models", { method: "POST", body: JSON.stringify(input) }),
     auditLogs: () => request<{ logs: AuditLog[] }>("/api/admin/audit-logs?limit=100"),
     users: () => request<{ users: ManagedUser[] }>("/api/admin/users"),
-    createUser: (input: { username: string; displayName: string; password: string }) => request<{ user: ManagedUser }>("/api/admin/users", { method: "POST", body: JSON.stringify(input) }),
-    updateUser: (id: number, input: { displayName: string; disabled: boolean }) => request<{ user: ManagedUser }>(`/api/admin/users/${id}`, { method: "PUT", body: JSON.stringify(input) }),
+    createUser: (input: { username: string; displayName: string; password: string; role: UserRole }) => request<{ user: ManagedUser }>("/api/admin/users", { method: "POST", body: JSON.stringify(input) }),
+    updateUser: (id: number, input: { displayName: string; disabled: boolean; role: UserRole }) => request<{ user: ManagedUser }>(`/api/admin/users/${id}`, { method: "PUT", body: JSON.stringify(input) }),
     resetUserPassword: (id: number, password: string) => request<{ ok: true }>(`/api/admin/users/${id}/password`, { method: "PUT", body: JSON.stringify({ password }) }),
     deleteUser: (id: number) => request<{ ok: true }>(`/api/admin/users/${id}`, { method: "DELETE" }),
     changePassword: (currentPassword: string, newPassword: string) => request<{ ok: true }>("/api/admin/password", { method: "PUT", body: JSON.stringify({ currentPassword, newPassword }) }),

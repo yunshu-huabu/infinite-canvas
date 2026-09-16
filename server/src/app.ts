@@ -2,7 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve, sep } from "node:path";
 
 import { adminConfig, normalizeManagedConfig, publicConfig } from "./config";
-import { AppDatabase, type AdminUser, type AppUser } from "./database";
+import { AppDatabase, type AdminUser, type AppUser, type UserRole } from "./database";
 import { hashToken, loadEncryptionKey, randomToken } from "./security";
 import { fetchUpstreamModels, normalizeBaseUrl, type UpstreamApiFormat } from "./upstream-models";
 
@@ -11,6 +11,8 @@ const USER_SESSION_COOKIE = "canvas_user_session";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const USER_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+
+type AdminAuth = { kind: "system"; principal: AdminUser; adminId: number; tokenHash: string } | { kind: "user"; principal: AppUser; adminId: null; tokenHash: string };
 
 export type AppOptions = {
     dataDir?: string;
@@ -71,33 +73,46 @@ async function handleAdmin(request: Request, url: URL, db: AppDatabase) {
         const rate = loginAttempts.get(ip);
         if (rate && rate.resetAt > Date.now() && rate.count >= 8) return json({ error: "登录尝试过多，请稍后再试" }, 429);
         const body = await readJson<{ username?: string; password?: string }>(request);
-        const admin = body.username ? db.findAdmin(body.username.trim()) : null;
-        const valid = Boolean(admin && body.password && (await Bun.password.verify(body.password, admin.password_hash)));
-        if (!valid || !admin) {
+        const username = String(body.username || "").trim();
+        const admin = username ? db.findAdmin(username) : null;
+        const managedUser = username ? db.findUser(username) : null;
+        const adminValid = Boolean(admin && body.password && (await Bun.password.verify(body.password, admin.password_hash)));
+        const managedUserValid = Boolean(managedUser?.role === "admin" && !managedUser.disabled && body.password && (await Bun.password.verify(body.password, managedUser.password_hash)));
+        if (!adminValid && !managedUserValid) {
             recordFailedLogin(ip);
-            db.audit(admin?.id || null, "admin.login_failed", "session", { username: body.username || "" }, ip);
+            db.audit(admin?.id || null, "admin.login_failed", "session", { username }, ip, managedUser?.username);
             return json({ error: "用户名或密码错误" }, 401);
         }
         loginAttempts.delete(ip);
         const token = randomToken();
-        const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
-        db.createSession(hashToken(token), admin.id, expiresAt.toISOString());
-        db.touchLogin(admin.id);
-        db.audit(admin.id, "admin.login", "session", {}, ip);
-        return json({ user: safeAdmin(admin) }, 200, {
-            "set-cookie": sessionCookie(token, expiresAt, secureRequest(request)),
+        if (adminValid && admin) {
+            const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
+            db.createSession(hashToken(token), admin.id, expiresAt.toISOString());
+            db.touchLogin(admin.id);
+            db.audit(admin.id, "admin.login", "session", {}, ip);
+            return json({ user: safeSystemAdmin(admin) }, 200, {
+                "set-cookie": sessionCookie(token, expiresAt, secureRequest(request)),
+            });
+        }
+        const expiresAt = new Date(Date.now() + USER_SESSION_TTL_MS);
+        db.createUserSession(hashToken(token), managedUser!.id, expiresAt.toISOString());
+        db.touchUserLogin(managedUser!.id);
+        db.audit(null, "admin.login", "session", { source: "managed_user" }, ip, managedUser!.username);
+        return json({ user: safeManagedAdmin(managedUser!) }, 200, {
+            "set-cookie": userSessionCookie(token, expiresAt, secureRequest(request)),
         });
     }
 
-    const auth = authenticate(request, db);
+    const auth = authenticateAdmin(request, db);
     if (!auth) return json({ error: "需要管理员登录" }, 401);
 
-    if (url.pathname === "/api/admin/session" && request.method === "GET") return json({ user: safeAdmin(auth.admin) });
+    if (url.pathname === "/api/admin/session" && request.method === "GET") return json({ user: safeAdminAuth(auth) });
     if (url.pathname === "/api/admin/logout" && request.method === "POST") {
-        db.deleteSession(auth.tokenHash);
-        db.audit(auth.admin.id, "admin.logout", "session", {}, ip);
+        if (auth.kind === "system") db.deleteSession(auth.tokenHash);
+        else db.deleteUserSession(auth.tokenHash);
+        auditAsAdmin(db, auth, "admin.logout", "session", {}, ip);
         return json({ ok: true }, 200, {
-            "set-cookie": clearSessionCookie(secureRequest(request)),
+            "set-cookie": auth.kind === "system" ? clearSessionCookie(secureRequest(request)) : clearUserSessionCookie(secureRequest(request)),
         });
     }
     if (url.pathname === "/api/admin/dashboard" && request.method === "GET") {
@@ -118,8 +133,8 @@ async function handleAdmin(request: Request, url: URL, db: AppDatabase) {
         const previous = db.getConfig();
         const config = normalizeManagedConfig(body.config, previous);
         assertUniqueChannels(config.channels.map((channel) => channel.id));
-        db.setConfig(config, auth.admin.id);
-        db.audit(auth.admin.id, "config.update", "ai_config", summarizeConfig(previous, config), ip);
+        db.setConfig(config, auth.adminId);
+        auditAsAdmin(db, auth, "config.update", "ai_config", summarizeConfig(previous, config), ip);
         return json({ config: adminConfig(config) });
     }
     if (url.pathname === "/api/admin/channels/models" && request.method === "POST") {
@@ -149,7 +164,7 @@ async function handleAdmin(request: Request, url: URL, db: AppDatabase) {
 
         try {
             const models = await fetchUpstreamModels({ baseUrl, apiKey, apiFormat });
-            db.audit(auth.admin.id, "channel.models_fetch", `channel:${channelId || "unsaved"}`, { count: models.length, apiFormat }, ip);
+            auditAsAdmin(db, auth, "channel.models_fetch", `channel:${channelId || "unsaved"}`, { count: models.length, apiFormat }, ip);
             return json({ models });
         } catch (error) {
             return json({ error: error instanceof Error ? error.message : "获取上游模型失败" }, 502);
@@ -160,12 +175,14 @@ async function handleAdmin(request: Request, url: URL, db: AppDatabase) {
             currentPassword?: string;
             newPassword?: string;
         }>(request);
-        if (!body.currentPassword || !(await Bun.password.verify(body.currentPassword, auth.admin.password_hash))) return json({ error: "当前密码不正确" }, 400);
+        if (!body.currentPassword || !(await Bun.password.verify(body.currentPassword, auth.principal.password_hash))) return json({ error: "当前密码不正确" }, 400);
         if (!body.newPassword || body.newPassword.length < 12) return json({ error: "新密码至少需要 12 个字符" }, 400);
-        db.updatePassword(auth.admin.id, await Bun.password.hash(body.newPassword, { algorithm: "argon2id" }));
-        db.audit(auth.admin.id, "admin.password_change", "admin", {}, ip);
+        const passwordHash = await Bun.password.hash(body.newPassword, { algorithm: "argon2id" });
+        if (auth.kind === "system") db.updatePassword(auth.principal.id, passwordHash);
+        else db.updateUserPassword(auth.principal.id, passwordHash);
+        auditAsAdmin(db, auth, "admin.password_change", "admin", {}, ip);
         return json({ ok: true }, 200, {
-            "set-cookie": clearSessionCookie(secureRequest(request)),
+            "set-cookie": auth.kind === "system" ? clearSessionCookie(secureRequest(request)) : clearUserSessionCookie(secureRequest(request)),
         });
     }
     if (url.pathname === "/api/admin/audit-logs" && request.method === "GET")
@@ -178,11 +195,14 @@ async function handleAdmin(request: Request, url: URL, db: AppDatabase) {
             username?: string;
             displayName?: string;
             password?: string;
+            role?: UserRole;
         }>(request);
         let username: string;
+        let role: UserRole;
         try {
             username = normalizeUsername(body.username);
             validateUserPassword(body.password);
+            role = normalizeUserRole(body.role);
         } catch (error) {
             return json({ error: error instanceof Error ? error.message : "用户信息不正确" }, 400);
         }
@@ -191,8 +211,8 @@ async function handleAdmin(request: Request, url: URL, db: AppDatabase) {
             .slice(0, 64);
         if (!displayName) return json({ error: "显示名称不能为空" }, 400);
         try {
-            const user = db.createUser(username, displayName, await Bun.password.hash(body.password!, { algorithm: "argon2id" }));
-            db.audit(auth.admin.id, "user.create", `user:${user.id}`, { username }, ip);
+            const user = db.createUser(username, displayName, await Bun.password.hash(body.password!, { algorithm: "argon2id" }), role);
+            auditAsAdmin(db, auth, "user.create", `user:${user.id}`, { username, role }, ip);
             return json({ user: safeUser(user as AppUser) }, 201);
         } catch (error) {
             if (String(error).toLowerCase().includes("unique")) return json({ error: "用户名已存在" }, 409);
@@ -204,7 +224,9 @@ async function handleAdmin(request: Request, url: URL, db: AppDatabase) {
         const userId = Number(userMatch[1]);
         const target = db.findUserById(userId);
         if (!target) return json({ error: "用户不存在" }, 404);
+        const isCurrentManagedAdmin = auth.kind === "user" && auth.principal.id === userId;
         if (userMatch[2] === "password" && request.method === "PUT") {
+            if (isCurrentManagedAdmin) return json({ error: "请在账号安全中修改自己的密码" }, 400);
             const body = await readJson<{ password?: string }>(request);
             try {
                 validateUserPassword(body.password);
@@ -212,22 +234,30 @@ async function handleAdmin(request: Request, url: URL, db: AppDatabase) {
                 return json({ error: error instanceof Error ? error.message : "密码不符合要求" }, 400);
             }
             db.updateUserPassword(userId, await Bun.password.hash(body.password!, { algorithm: "argon2id" }));
-            db.audit(auth.admin.id, "user.password_reset", `user:${userId}`, { username: target.username }, ip);
+            auditAsAdmin(db, auth, "user.password_reset", `user:${userId}`, { username: target.username }, ip);
             return json({ ok: true });
         }
         if (!userMatch[2] && request.method === "PUT") {
-            const body = await readJson<{ displayName?: string; disabled?: boolean }>(request);
+            const body = await readJson<{ displayName?: string; disabled?: boolean; role?: UserRole }>(request);
             const displayName = String(body.displayName || target.display_name)
                 .trim()
                 .slice(0, 64);
             if (!displayName) return json({ error: "显示名称不能为空" }, 400);
-            const user = db.updateUser(userId, displayName, Boolean(body.disabled));
-            db.audit(auth.admin.id, body.disabled ? "user.disable" : "user.update", `user:${userId}`, { username: target.username }, ip);
+            let role: UserRole;
+            try {
+                role = normalizeUserRole(body.role, target.role);
+            } catch (error) {
+                return json({ error: error instanceof Error ? error.message : "用户角色不正确" }, 400);
+            }
+            if (isCurrentManagedAdmin && (Boolean(body.disabled) || role !== "admin")) return json({ error: "不能停用当前账号或移除自己的管理员角色" }, 400);
+            const user = db.updateUser(userId, displayName, Boolean(body.disabled), role);
+            auditAsAdmin(db, auth, body.disabled ? "user.disable" : "user.update", `user:${userId}`, { username: target.username, role }, ip);
             return json({ user: safeUser(user!) });
         }
         if (!userMatch[2] && request.method === "DELETE") {
+            if (isCurrentManagedAdmin) return json({ error: "不能删除当前登录账号" }, 400);
             db.deleteUser(userId);
-            db.audit(auth.admin.id, "user.delete", `user:${userId}`, { username: target.username }, ip);
+            auditAsAdmin(db, auth, "user.delete", `user:${userId}`, { username: target.username }, ip);
             return json({ ok: true });
         }
     }
@@ -336,12 +366,19 @@ async function handleAiProxy(request: Request, url: URL, db: AppDatabase) {
     }
 }
 
-function authenticate(request: Request, db: AppDatabase) {
-    const token = parseCookies(request.headers.get("cookie") || "")[SESSION_COOKIE];
-    if (!token) return null;
-    const tokenHash = hashToken(token);
-    const admin = db.sessionAdmin(tokenHash);
-    return admin ? { admin, tokenHash } : null;
+function authenticateAdmin(request: Request, db: AppDatabase): AdminAuth | null {
+    const cookies = parseCookies(request.headers.get("cookie") || "");
+    const adminToken = cookies[SESSION_COOKIE];
+    if (adminToken) {
+        const tokenHash = hashToken(adminToken);
+        const admin = db.sessionAdmin(tokenHash);
+        if (admin) return { kind: "system", principal: admin, adminId: admin.id, tokenHash };
+    }
+    const userToken = cookies[USER_SESSION_COOKIE];
+    if (!userToken) return null;
+    const tokenHash = hashToken(userToken);
+    const user = db.sessionUser(tokenHash);
+    return user?.role === "admin" ? { kind: "user", principal: user, adminId: null, tokenHash } : null;
 }
 
 function authenticateUser(request: Request, db: AppDatabase) {
@@ -352,13 +389,34 @@ function authenticateUser(request: Request, db: AppDatabase) {
     return user ? { user, tokenHash } : null;
 }
 
-function safeAdmin(admin: AdminUser) {
+function safeSystemAdmin(admin: AdminUser) {
     return {
         id: admin.id,
         username: admin.username,
+        displayName: admin.username,
+        role: "admin" as const,
+        source: "system" as const,
+        managedUserId: null,
         createdAt: admin.created_at,
         lastLoginAt: admin.last_login_at,
     };
+}
+
+function safeManagedAdmin(user: AppUser) {
+    return {
+        id: user.id,
+        username: user.username,
+        displayName: user.display_name,
+        role: "admin" as const,
+        source: "user" as const,
+        managedUserId: user.id,
+        createdAt: user.created_at,
+        lastLoginAt: user.last_login_at,
+    };
+}
+
+function safeAdminAuth(auth: AdminAuth) {
+    return auth.kind === "system" ? safeSystemAdmin(auth.principal) : safeManagedAdmin(auth.principal);
 }
 
 function safeUser(user: AppUser | Omit<AppUser, "password_hash">) {
@@ -366,6 +424,7 @@ function safeUser(user: AppUser | Omit<AppUser, "password_hash">) {
         id: user.id,
         username: user.username,
         displayName: user.display_name,
+        role: user.role,
         disabled: Boolean(user.disabled),
         createdAt: user.created_at,
         updatedAt: user.updated_at,
@@ -441,6 +500,16 @@ function normalizeUsername(value: unknown) {
 
 function validateUserPassword(value: unknown) {
     if (typeof value !== "string" || value.length < 8) throw new Error("用户密码至少需要 8 个字符");
+}
+
+function normalizeUserRole(value: unknown, fallback: UserRole = "user"): UserRole {
+    if (value === undefined || value === null || value === "") return fallback;
+    if (value === "admin" || value === "user") return value;
+    throw new Error("用户角色必须是管理员或普通用户");
+}
+
+function auditAsAdmin(db: AppDatabase, auth: AdminAuth, action: string, target: string, detail: unknown, ip: string) {
+    db.audit(auth.adminId, action, target, detail, ip, auth.kind === "user" ? auth.principal.username : undefined);
 }
 
 function assertUniqueChannels(ids: string[]) {

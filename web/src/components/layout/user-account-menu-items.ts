@@ -4,6 +4,6 @@ export type UserAccountMenuAction = {
     danger?: boolean;
 };
 
-export function getUserAccountMenuActions(backendManaged: boolean): UserAccountMenuAction[] {
-    return [...(backendManaged ? ([{ key: "admin", label: "后端管理" }] satisfies UserAccountMenuAction[]) : []), { key: "password", label: "修改密码" }, { key: "logout", label: "退出登录", danger: true }];
+export function getUserAccountMenuActions(backendManaged: boolean, role: "admin" | "user"): UserAccountMenuAction[] {
+    return [...(backendManaged && role === "admin" ? ([{ key: "admin", label: "后端管理" }] satisfies UserAccountMenuAction[]) : []), { key: "password", label: "修改密码" }, { key: "logout", label: "退出登录", danger: true }];
 }

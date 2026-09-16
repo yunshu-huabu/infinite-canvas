@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { createApp } from "./app";
+import { AppDatabase } from "./database";
 
 let app: Awaited<ReturnType<typeof createApp>>;
 
@@ -36,6 +41,10 @@ async function login(password = "correct-horse-battery") {
 }
 
 async function loginUser(password = "creator-password") {
+    return loginManagedUser("creator", password);
+}
+
+async function loginManagedUser(username: string, password: string) {
     const response = await app.fetch(
         new Request("http://localhost/api/auth/login", {
             method: "POST",
@@ -43,7 +52,7 @@ async function loginUser(password = "creator-password") {
                 "content-type": "application/json",
                 origin: "http://localhost",
             },
-            body: JSON.stringify({ username: "creator", password }),
+            body: JSON.stringify({ username, password }),
         }),
     );
     return {
@@ -313,7 +322,7 @@ describe("user authentication", () => {
         expect(cookie).toContain("canvas_user_session=");
         const session = await app.fetch(new Request("http://localhost/api/auth/session", { headers: { cookie } }));
         expect(session.status).toBe(200);
-        expect((await session.json()).user.displayName).toBe("创作者");
+        expect((await session.json()).user).toMatchObject({ displayName: "创作者", role: "user" });
     });
 
     test("protects configuration and AI proxy endpoints", async () => {
@@ -353,12 +362,13 @@ describe("admin user management", () => {
                     username: "designer",
                     displayName: "设计师",
                     password: "designer-password",
+                    role: "admin",
                 }),
             }),
         );
         expect(created.status).toBe(201);
         const users = await app.fetch(new Request("http://localhost/api/admin/users", { headers: { cookie } }));
-        expect((await users.json()).users.some((user: { username: string }) => user.username === "designer")).toBe(true);
+        expect((await users.json()).users).toContainEqual(expect.objectContaining({ username: "designer", role: "admin" }));
     });
 
     test("rejects invalid user account input", async () => {
@@ -379,5 +389,116 @@ describe("admin user management", () => {
             }),
         );
         expect(response.status).toBe(400);
+    });
+
+    test("admin users can enter the management console and create users", async () => {
+        const manager = app.db.createUser("manager", "管理员", await Bun.password.hash("manager-password", { algorithm: "argon2id" }), "admin");
+        const { cookie } = await loginManagedUser("manager", "manager-password");
+
+        const session = await app.fetch(new Request("http://localhost/api/admin/session", { headers: { cookie } }));
+        expect(session.status).toBe(200);
+        expect((await session.json()).user).toMatchObject({ username: "manager", role: "admin", source: "user", managedUserId: manager.id });
+
+        const created = await app.fetch(
+            new Request("http://localhost/api/admin/users", {
+                method: "POST",
+                headers: { cookie, origin: "http://localhost", "content-type": "application/json" },
+                body: JSON.stringify({ username: "member", displayName: "普通成员", password: "member-password", role: "user" }),
+            }),
+        );
+        expect(created.status).toBe(201);
+        expect((await created.json()).user).toMatchObject({ username: "member", role: "user" });
+
+        const logs = await app.fetch(new Request("http://localhost/api/admin/audit-logs", { headers: { cookie } }));
+        expect((await logs.json()).logs.some((log: { username?: string; action: string }) => log.username === "manager" && log.action === "user.create")).toBe(true);
+    });
+
+    test("normal users cannot access management APIs", async () => {
+        const { cookie } = await loginUser();
+        const response = await app.fetch(new Request("http://localhost/api/admin/users", { headers: { cookie } }));
+        expect(response.status).toBe(401);
+    });
+
+    test("managed admins cannot demote, disable, reset, or delete their own account", async () => {
+        const manager = app.db.createUser("manager", "管理员", await Bun.password.hash("manager-password", { algorithm: "argon2id" }), "admin");
+        const { cookie } = await loginManagedUser("manager", "manager-password");
+        const headers = { cookie, origin: "http://localhost", "content-type": "application/json" };
+
+        const update = await app.fetch(
+            new Request(`http://localhost/api/admin/users/${manager.id}`, {
+                method: "PUT",
+                headers,
+                body: JSON.stringify({ displayName: "管理员", role: "user", disabled: false }),
+            }),
+        );
+        expect(update.status).toBe(400);
+
+        const reset = await app.fetch(
+            new Request(`http://localhost/api/admin/users/${manager.id}/password`, {
+                method: "PUT",
+                headers,
+                body: JSON.stringify({ password: "new-manager-password" }),
+            }),
+        );
+        expect(reset.status).toBe(400);
+
+        const remove = await app.fetch(new Request(`http://localhost/api/admin/users/${manager.id}`, { method: "DELETE", headers }));
+        expect(remove.status).toBe(400);
+    });
+
+    test("admin users can sign in directly on the management login page", async () => {
+        app.db.createUser("manager", "管理员", await Bun.password.hash("manager-password", { algorithm: "argon2id" }), "admin");
+        const response = await app.fetch(
+            new Request("http://localhost/api/admin/login", {
+                method: "POST",
+                headers: { origin: "http://localhost", "content-type": "application/json" },
+                body: JSON.stringify({ username: "manager", password: "manager-password" }),
+            }),
+        );
+        expect(response.status).toBe(200);
+        expect(response.headers.get("set-cookie")).toContain("canvas_user_session=");
+        expect((await response.json()).user).toMatchObject({ username: "manager", source: "user", role: "admin" });
+    });
+});
+
+describe("database migrations", () => {
+    test("adds roles and managed-admin audit actors to an existing database", () => {
+        const directory = mkdtempSync(join(tmpdir(), "canvas-role-migration-"));
+        const databasePath = join(directory, "legacy.sqlite");
+        const legacy = new Database(databasePath, { create: true });
+        legacy.exec(`
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                display_name TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                disabled INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_login_at TEXT
+            );
+            CREATE TABLE audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id INTEGER,
+                action TEXT NOT NULL,
+                target TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '{}',
+                ip TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO users (username, display_name, password_hash, created_at, updated_at)
+            VALUES ('legacy-user', '旧版用户', 'hash', '2026-09-16T00:00:00.000Z', '2026-09-16T00:00:00.000Z');
+        `);
+        legacy.close();
+
+        const migrated = new AppDatabase(databasePath, Buffer.alloc(32, 7));
+        try {
+            expect(migrated.findUser("legacy-user")?.role).toBe("user");
+            migrated.audit(null, "user.create", "user:2", {}, "local", "manager");
+            expect(migrated.audits(1)[0]).toMatchObject({ username: "manager", action: "user.create" });
+        } finally {
+            migrated.close();
+            rmSync(directory, { recursive: true, force: true });
+        }
     });
 });

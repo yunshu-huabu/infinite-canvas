@@ -13,11 +13,13 @@ export type AdminUser = {
     updated_at: string;
     last_login_at: string | null;
 };
+export type UserRole = "admin" | "user";
 export type AppUser = {
     id: number;
     username: string;
     display_name: string;
     password_hash: string;
+    role: UserRole;
     disabled: number;
     created_at: string;
     updated_at: string;
@@ -58,6 +60,7 @@ export class AppDatabase {
                 username TEXT NOT NULL UNIQUE COLLATE NOCASE,
                 display_name TEXT NOT NULL,
                 password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('admin', 'user')),
                 disabled INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -82,6 +85,7 @@ export class AppDatabase {
                 action TEXT NOT NULL,
                 target TEXT NOT NULL,
                 detail TEXT NOT NULL DEFAULT '{}',
+                actor_username TEXT,
                 ip TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
@@ -99,7 +103,14 @@ export class AppDatabase {
             CREATE INDEX IF NOT EXISTS audit_created_idx ON audit_logs(created_at DESC);
             CREATE INDEX IF NOT EXISTS requests_created_idx ON api_requests(created_at DESC);
         `);
+        this.ensureColumn("users", "role", "TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('admin', 'user'))");
+        this.ensureColumn("audit_logs", "actor_username", "TEXT");
         if (!this.sqlite.query("SELECT 1 FROM settings WHERE key = 'ai_config'").get()) this.setConfig(defaultManagedConfig, null);
+    }
+
+    private ensureColumn(table: "users" | "audit_logs", column: string, definition: string) {
+        const columns = this.sqlite.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+        if (!columns.some((item) => item.name === column)) this.sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     }
 
     close() {
@@ -165,15 +176,15 @@ export class AppDatabase {
         );
     }
 
-    createUser(username: string, displayName: string, passwordHash: string) {
+    createUser(username: string, displayName: string, passwordHash: string, role: UserRole = "user") {
         const now = new Date().toISOString();
         return this.sqlite
-            .query("INSERT INTO users (username, display_name, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?) RETURNING id, username, display_name, disabled, created_at, updated_at, last_login_at")
-            .get(username, displayName, passwordHash, now, now) as Omit<AppUser, "password_hash">;
+            .query("INSERT INTO users (username, display_name, password_hash, role, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id, username, display_name, role, disabled, created_at, updated_at, last_login_at")
+            .get(username, displayName, passwordHash, role, now, now) as Omit<AppUser, "password_hash">;
     }
 
     users() {
-        return this.sqlite.query("SELECT id, username, display_name, disabled, created_at, updated_at, last_login_at FROM users ORDER BY id DESC").all();
+        return this.sqlite.query("SELECT id, username, display_name, role, disabled, created_at, updated_at, last_login_at FROM users ORDER BY id DESC").all();
     }
 
     findUser(username: string) {
@@ -184,8 +195,8 @@ export class AppDatabase {
         return this.sqlite.query("SELECT * FROM users WHERE id = ?").get(id) as AppUser | null;
     }
 
-    updateUser(id: number, displayName: string, disabled: boolean) {
-        this.sqlite.query("UPDATE users SET display_name = ?, disabled = ?, updated_at = ? WHERE id = ?").run(displayName, disabled ? 1 : 0, new Date().toISOString(), id);
+    updateUser(id: number, displayName: string, disabled: boolean, role: UserRole = "user") {
+        this.sqlite.query("UPDATE users SET display_name = ?, role = ?, disabled = ?, updated_at = ? WHERE id = ?").run(displayName, role, disabled ? 1 : 0, new Date().toISOString(), id);
         if (disabled) this.sqlite.query("DELETE FROM user_sessions WHERE user_id = ?").run(id);
         return this.findUserById(id);
     }
@@ -227,20 +238,20 @@ export class AppDatabase {
     setConfig(config: ManagedAiConfig, adminId: number | null) {
         const value = encryptJson(config, this.encryptionKey);
         this.sqlite
-            .query(
-                "INSERT INTO settings (key, value, encrypted, updated_by, updated_at) VALUES ('ai_config', ?, 1, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at",
-            )
+            .query("INSERT INTO settings (key, value, encrypted, updated_by, updated_at) VALUES ('ai_config', ?, 1, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at")
             .run(value, adminId, new Date().toISOString());
     }
 
-    audit(adminId: number | null, action: string, target: string, detail: unknown, ip: string) {
-        this.sqlite.query("INSERT INTO audit_logs (admin_id, action, target, detail, ip, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(adminId, action, target, JSON.stringify(detail || {}), ip, new Date().toISOString());
+    audit(adminId: number | null, action: string, target: string, detail: unknown, ip: string, actorUsername?: string) {
+        this.sqlite
+            .query("INSERT INTO audit_logs (admin_id, action, target, detail, actor_username, ip, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .run(adminId, action, target, JSON.stringify(detail || {}), actorUsername || null, ip, new Date().toISOString());
     }
 
     audits(limit = 100) {
         return this.sqlite
             .query(
-                "SELECT audit_logs.id, audit_logs.action, audit_logs.target, audit_logs.detail, audit_logs.ip, audit_logs.created_at, admins.username FROM audit_logs LEFT JOIN admins ON admins.id = audit_logs.admin_id ORDER BY audit_logs.id DESC LIMIT ?",
+                "SELECT audit_logs.id, audit_logs.action, audit_logs.target, audit_logs.detail, audit_logs.ip, audit_logs.created_at, COALESCE(audit_logs.actor_username, admins.username) AS username FROM audit_logs LEFT JOIN admins ON admins.id = audit_logs.admin_id ORDER BY audit_logs.id DESC LIMIT ?",
             )
             .all(Math.max(1, Math.min(200, limit)));
     }

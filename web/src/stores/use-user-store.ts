@@ -4,6 +4,7 @@ export type LocalUser = {
     id: number;
     username: string;
     displayName: string;
+    role: "admin" | "user";
     disabled: boolean;
     createdAt: string;
     updatedAt: string;

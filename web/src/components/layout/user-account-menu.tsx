@@ -1,15 +1,18 @@
 import { App, Button, Dropdown, Form, Input, Modal, type MenuProps } from "antd";
-import { KeyRound, LogOut, UserRound } from "lucide-react";
+import { KeyRound, LogOut, ServerCog, UserRound } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { userApi } from "@/services/user-api";
+import { getUserAccountMenuActions, type UserAccountMenuAction } from "@/components/layout/user-account-menu-items";
+import { useConfigStore } from "@/stores/use-config-store";
 import { useUserStore } from "@/stores/use-user-store";
 
 export function UserAccountMenu({ className, style }: { className: string; style?: React.CSSProperties }) {
     const { message } = App.useApp();
     const navigate = useNavigate();
     const user = useUserStore((state) => state.user);
+    const backendManaged = useConfigStore((state) => state.backendManaged);
     const clearSession = useUserStore((state) => state.clearSession);
     const [passwordOpen, setPasswordOpen] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -41,6 +44,23 @@ export function UserAccountMenu({ className, style }: { className: string; style
         }
     };
 
+    const actionIcons: Record<UserAccountMenuAction["key"], React.ReactNode> = {
+        admin: <ServerCog className="size-4" />,
+        password: <KeyRound className="size-4" />,
+        logout: <LogOut className="size-4" />,
+    };
+    const actionHandlers: Record<UserAccountMenuAction["key"], () => void> = {
+        admin: () => navigate("/admin"),
+        password: () => setPasswordOpen(true),
+        logout: () => void logout(),
+    };
+    const actionItems: MenuProps["items"] = getUserAccountMenuActions(backendManaged).map(({ key, label, danger }) => ({
+        key,
+        icon: actionIcons[key],
+        label,
+        danger,
+        onClick: actionHandlers[key],
+    }));
     const items: MenuProps["items"] = [
         {
             key: "identity",
@@ -53,8 +73,7 @@ export function UserAccountMenu({ className, style }: { className: string; style
             disabled: true,
         },
         { type: "divider" },
-        { key: "password", icon: <KeyRound className="size-4" />, label: "修改密码", onClick: () => setPasswordOpen(true) },
-        { key: "logout", icon: <LogOut className="size-4" />, label: "退出登录", danger: true, onClick: () => void logout() },
+        ...actionItems,
     ];
 
     return (

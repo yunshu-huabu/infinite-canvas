@@ -2,7 +2,6 @@ import { App, Button, Form, Input, Modal, Progress, Select, Tabs } from "antd";
 import type { TFunction } from "i18next";
 import { Cloud, Download, Pencil, Plus, RefreshCw, ServerCog, Trash2, Upload, Wifi } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -364,9 +363,6 @@ function ServerManagedNotice() {
             </span>
             <div className="text-sm font-semibold">此项由后端统一管理</div>
             <p className="mt-2 max-w-md text-xs leading-5 text-stone-500">AI 渠道、密钥和全局默认参数已迁移到服务端，浏览器不会再保存真实 API Key。</p>
-            <Link to="/admin" className="mt-4">
-                <Button type="primary">打开管理控制台</Button>
-            </Link>
         </div>
     );
 }

@@ -12,20 +12,28 @@ export default function LoginPage() {
     const navigate = useNavigate();
     const location = useLocation();
     const user = useUserStore((state) => state.user);
+    const sessionChecked = useUserStore((state) => state.sessionChecked);
     const setSession = useUserStore((state) => state.setSession);
-    const [checking, setChecking] = useState(!user);
+    const clearSession = useUserStore((state) => state.clearSession);
     const [submitting, setSubmitting] = useState(false);
 
     useEffect(() => {
-        if (user) return;
+        if (sessionChecked) return;
+        let active = true;
         userApi
             .session()
-            .then(({ user: sessionUser }) => setSession(sessionUser))
-            .catch(() => undefined)
-            .finally(() => setChecking(false));
-    }, [setSession, user]);
+            .then(({ user: sessionUser }) => {
+                if (active) setSession(sessionUser);
+            })
+            .catch(() => {
+                if (active) clearSession();
+            });
+        return () => {
+            active = false;
+        };
+    }, [clearSession, sessionChecked, setSession]);
 
-    if (checking)
+    if (!sessionChecked)
         return (
             <div className="flex h-dvh items-center justify-center bg-stone-950">
                 <Spin size="large" />

@@ -1,5 +1,5 @@
 import { Spin } from "antd";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 
 import { userApi } from "@/services/user-api";
@@ -8,12 +8,12 @@ import { useUserStore } from "@/stores/use-user-store";
 export function ProtectedUserRoute({ children }: { children: ReactNode }) {
     const location = useLocation();
     const user = useUserStore((state) => state.user);
+    const sessionChecked = useUserStore((state) => state.sessionChecked);
     const setSession = useUserStore((state) => state.setSession);
     const clearSession = useUserStore((state) => state.clearSession);
-    const [checking, setChecking] = useState(!user);
 
     useEffect(() => {
-        if (user) return;
+        if (sessionChecked) return;
         let active = true;
         userApi
             .session()
@@ -22,16 +22,13 @@ export function ProtectedUserRoute({ children }: { children: ReactNode }) {
             })
             .catch(() => {
                 if (active) clearSession();
-            })
-            .finally(() => {
-                if (active) setChecking(false);
             });
         return () => {
             active = false;
         };
-    }, [clearSession, setSession, user]);
+    }, [clearSession, sessionChecked, setSession]);
 
-    if (checking)
+    if (!sessionChecked)
         return (
             <div className="flex h-dvh items-center justify-center bg-background">
                 <Spin size="large" />
